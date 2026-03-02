@@ -35,6 +35,7 @@ type BridgeAPI interface {
 	// Memory metrics
 	GetMemoryMetrics(tabID string) (*MemoryMetrics, error)
 	GetBrowserMemoryMetrics() (*MemoryMetrics, error)
+	GetAggregatedMemoryMetrics() (*MemoryMetrics, error)
 }
 
 type LockInfo struct {

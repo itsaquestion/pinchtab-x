@@ -35,6 +35,29 @@ func (b *Bridge) GetBrowserMemoryMetrics() (*MemoryMetrics, error) {
 	return getMetricsFromContext(b.BrowserCtx)
 }
 
+// GetAggregatedMemoryMetrics returns summed memory metrics across all open tabs
+func (b *Bridge) GetAggregatedMemoryMetrics() (*MemoryMetrics, error) {
+	tabIDs := b.TabManager.AccessedTabIDs()
+	if len(tabIDs) == 0 {
+		return &MemoryMetrics{}, nil
+	}
+
+	total := &MemoryMetrics{}
+	for tabID := range tabIDs {
+		mem, err := b.GetMemoryMetrics(tabID)
+		if err != nil || mem == nil {
+			continue
+		}
+		total.JSHeapUsedMB += mem.JSHeapUsedMB
+		total.JSHeapTotalMB += mem.JSHeapTotalMB
+		total.Documents += mem.Documents
+		total.Frames += mem.Frames
+		total.Nodes += mem.Nodes
+		total.Listeners += mem.Listeners
+	}
+	return total, nil
+}
+
 func getMetricsFromContext(ctx context.Context) (*MemoryMetrics, error) {
 	// Enable performance metrics collection
 	if err := chromedp.Run(ctx, performance.Enable()); err != nil {
