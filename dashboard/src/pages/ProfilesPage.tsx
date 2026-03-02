@@ -218,14 +218,14 @@ export default function ProfilesPage() {
       <Modal
         open={!!showLaunch}
         onClose={() => setShowLaunch(null)}
-        title="🖥️ Launch Profile"
+        title="🖥️ Start Profile"
         actions={
           <>
             <Button variant="secondary" onClick={() => setShowLaunch(null)}>
               Cancel
             </Button>
             <Button variant="primary" onClick={handleLaunch}>
-              Launch
+              Start
             </Button>
           </>
         }

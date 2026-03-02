@@ -232,7 +232,7 @@ export default function ProfileDetailsModal({
               </div>
             ) : (
               <div className="flex h-[300px] items-center justify-center text-sm text-text-muted">
-                Instance not running. Launch the profile to see live view.
+                Instance not running. Start the profile to see live view.
               </div>
             )}
           </div>

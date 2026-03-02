@@ -86,7 +86,7 @@ export default function ProfileCard({
             className="flex-1"
             onClick={onLaunch}
           >
-            Launch
+            Start
           </Button>
         )}
       </div>

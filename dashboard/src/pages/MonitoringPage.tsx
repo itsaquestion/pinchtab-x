@@ -101,7 +101,7 @@ export default function MonitoringPage() {
       <div className="flex flex-1 items-center justify-center p-4">
         <EmptyState
           title="No instances"
-          description="Launch a profile to start an instance"
+          description="Start a profile to create an instance"
         />
       </div>
     )
