@@ -2,129 +2,184 @@ package bridge
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
-	"github.com/chromedp/cdproto/performance"
-	"github.com/chromedp/cdproto/target"
+	"github.com/chromedp/cdproto/systeminfo"
 	"github.com/chromedp/chromedp"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 // MemoryMetrics holds Chrome memory statistics
 type MemoryMetrics struct {
+	// OS-level memory (real RAM usage)
+	MemoryMB float64 `json:"memoryMB"` // Total RSS across renderer processes
+
+	// Legacy JS-heap fields (for backward compat, now estimated)
 	JSHeapUsedMB  float64 `json:"jsHeapUsedMB"`
 	JSHeapTotalMB float64 `json:"jsHeapTotalMB"`
-	Documents     int64   `json:"documents"`
-	Frames        int64   `json:"frames"`
-	Nodes         int64   `json:"nodes"`
-	Listeners     int64   `json:"listeners"`
+
+	// Process counts
+	Renderers int `json:"renderers"` // Number of renderer processes (≈ tabs)
+
+	// Legacy fields (set to 0, kept for API compat)
+	Documents int64 `json:"documents"`
+	Frames    int64 `json:"frames"`
+	Nodes     int64 `json:"nodes"`
+	Listeners int64 `json:"listeners"`
 }
 
 // GetMemoryMetrics retrieves memory metrics for a specific tab
+// Now uses OS-level memory instead of per-tab CDP calls
 func (b *Bridge) GetMemoryMetrics(tabID string) (*MemoryMetrics, error) {
-	ctx, _, err := b.TabContext(tabID)
-	if err != nil {
-		return nil, err
-	}
-
-	return getMetricsFromContext(ctx)
+	// For single tab, return aggregated (we can't map tab→PID reliably)
+	return b.GetAggregatedMemoryMetrics()
 }
 
 // GetBrowserMemoryMetrics retrieves memory metrics for the entire browser
 func (b *Bridge) GetBrowserMemoryMetrics() (*MemoryMetrics, error) {
+	return b.GetAggregatedMemoryMetrics()
+}
+
+// GetAggregatedMemoryMetrics returns real OS memory usage across all Chrome processes
+// Uses hybrid approach: CDP for process IDs, gopsutil for actual memory
+func (b *Bridge) GetAggregatedMemoryMetrics() (*MemoryMetrics, error) {
 	if b.BrowserCtx == nil {
 		return nil, nil
 	}
-	return getMetricsFromContext(b.BrowserCtx)
-}
-
-// GetAggregatedMemoryMetrics returns summed memory metrics across all open tabs
-func (b *Bridge) GetAggregatedMemoryMetrics() (*MemoryMetrics, error) {
-	targets, err := b.ListTargets()
-	if err != nil {
-		return nil, err
-	}
-
-	total := &MemoryMetrics{}
-	for _, t := range targets {
-		if t.Type != "page" {
-			continue
-		}
-		// Try to get metrics - skip on any error
-		mem := b.safeGetMetricsForTarget(string(t.TargetID))
-		if mem == nil {
-			continue
-		}
-		total.JSHeapUsedMB += mem.JSHeapUsedMB
-		total.JSHeapTotalMB += mem.JSHeapTotalMB
-		total.Documents += mem.Documents
-		total.Frames += mem.Frames
-		total.Nodes += mem.Nodes
-		total.Listeners += mem.Listeners
-	}
-	return total, nil
-}
-
-// safeGetMetricsForTarget safely gets metrics, returning nil on any error
-func (b *Bridge) safeGetMetricsForTarget(targetID string) *MemoryMetrics {
-	mem, err := b.getMetricsForTarget(targetID)
-	if err != nil {
-		return nil
-	}
-	return mem
-}
-
-// getMetricsForTarget gets metrics for a raw CDP target ID
-func (b *Bridge) getMetricsForTarget(targetID string) (result *MemoryMetrics, err error) {
-	// Recover from panics - some targets may not support metrics
-	defer func() {
-		if r := recover(); r != nil {
-			result = nil
-			err = nil // swallow error, just skip this target
-		}
-	}()
-
-	// Create context with timeout to avoid hanging
-	ctx, cancel := chromedp.NewContext(b.BrowserCtx, chromedp.WithTargetID(target.ID(targetID)))
-	defer cancel()
-
-	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 2*time.Second)
-	defer timeoutCancel()
-
-	return getMetricsFromContext(timeoutCtx)
-}
-
-func getMetricsFromContext(ctx context.Context) (*MemoryMetrics, error) {
-	// Enable performance metrics collection
-	if err := chromedp.Run(ctx, performance.Enable()); err != nil {
-		return nil, err
-	}
-
-	var metrics []*performance.Metric
-	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		var err error
-		metrics, err = performance.GetMetrics().Do(ctx)
-		return err
-	})); err != nil {
-		return nil, err
-	}
 
 	result := &MemoryMetrics{}
-	for _, m := range metrics {
-		switch m.Name {
-		case "JSHeapUsedSize":
-			result.JSHeapUsedMB = m.Value / (1024 * 1024)
-		case "JSHeapTotalSize":
-			result.JSHeapTotalMB = m.Value / (1024 * 1024)
-		case "Documents":
-			result.Documents = int64(m.Value)
-		case "Frames":
-			result.Frames = int64(m.Value)
-		case "Nodes":
-			result.Nodes = int64(m.Value)
-		case "JSEventListeners":
-			result.Listeners = int64(m.Value)
+
+	// Try SystemInfo.getProcessInfo first (browser-level, non-intrusive)
+	procInfo, err := b.getProcessInfo()
+	if err != nil {
+		slog.Debug("SystemInfo.getProcessInfo failed, using fallback", "err", err)
+		return b.getMemoryViaProcessTree()
+	}
+
+	var totalMem uint64
+	rendererCount := 0
+
+	for _, p := range procInfo {
+		if p.Type == "renderer" || p.Type == "tab" {
+			mem, err := getProcessMemory(int32(p.ID))
+			if err != nil {
+				slog.Debug("failed to get process memory", "pid", p.ID, "err", err)
+				continue
+			}
+			totalMem += mem
+			rendererCount++
 		}
 	}
 
+	result.MemoryMB = float64(totalMem) / (1024 * 1024)
+	result.Renderers = rendererCount
+
+	// Estimate JS heap as ~40% of total memory (rough heuristic)
+	result.JSHeapUsedMB = result.MemoryMB * 0.4
+	result.JSHeapTotalMB = result.MemoryMB * 0.5
+
 	return result, nil
+}
+
+// getProcessInfo calls SystemInfo.getProcessInfo via CDP
+func (b *Bridge) getProcessInfo() ([]*systeminfo.ProcessInfo, error) {
+	ctx, cancel := context.WithTimeout(b.BrowserCtx, 5*time.Second)
+	defer cancel()
+
+	var procInfo []*systeminfo.ProcessInfo
+	err := chromedp.Run(ctx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var err error
+			procInfo, err = systeminfo.GetProcessInfo().Do(ctx)
+			return err
+		}),
+	)
+	return procInfo, err
+}
+
+// getMemoryViaProcessTree is a fallback that walks the browser process tree
+func (b *Bridge) getMemoryViaProcessTree() (*MemoryMetrics, error) {
+	result := &MemoryMetrics{}
+
+	// Get browser PID from chromedp
+	browser := chromedp.FromContext(b.BrowserCtx)
+	if browser == nil || browser.Browser == nil {
+		return result, nil
+	}
+
+	proc := browser.Browser.Process()
+	if proc == nil {
+		return result, nil
+	}
+
+	mainPID := int32(proc.Pid)
+	p, err := process.NewProcess(mainPID)
+	if err != nil {
+		return result, err
+	}
+
+	// Get all children (recursive)
+	children, err := p.Children()
+	if err != nil {
+		// Just count main process
+		mem, _ := getProcessMemory(mainPID)
+		result.MemoryMB = float64(mem) / (1024 * 1024)
+		return result, nil
+	}
+
+	var totalMem uint64
+	rendererCount := 0
+
+	// Add main process
+	mem, _ := getProcessMemory(mainPID)
+	totalMem += mem
+
+	// Add children
+	for _, child := range children {
+		cmdline, _ := child.Cmdline()
+		// Filter for renderer processes
+		if containsRenderer(cmdline) {
+			rendererCount++
+		}
+		childMem, _ := getProcessMemory(child.Pid)
+		totalMem += childMem
+	}
+
+	result.MemoryMB = float64(totalMem) / (1024 * 1024)
+	result.Renderers = rendererCount
+	result.JSHeapUsedMB = result.MemoryMB * 0.4
+	result.JSHeapTotalMB = result.MemoryMB * 0.5
+
+	return result, nil
+}
+
+// getProcessMemory returns RSS memory in bytes for a process
+func getProcessMemory(pid int32) (uint64, error) {
+	p, err := process.NewProcess(pid)
+	if err != nil {
+		return 0, err
+	}
+
+	mem, err := p.MemoryInfo()
+	if err != nil {
+		return 0, err
+	}
+
+	// RSS is the resident set size (actual RAM used)
+	return mem.RSS, nil
+}
+
+// containsRenderer checks if cmdline indicates a renderer process
+func containsRenderer(cmdline string) bool {
+	return len(cmdline) > 0 && (stringContains(cmdline, "--type=renderer") || stringContains(cmdline, "--type=tab"))
+}
+
+func stringContains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
