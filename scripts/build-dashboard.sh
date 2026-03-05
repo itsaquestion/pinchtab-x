@@ -34,8 +34,9 @@ bun run build
 echo "📋 Copying build to internal/dashboard/dashboard/..."
 cd ..
 
-# Clear old dashboard (keep directory)
-rm -rf internal/dashboard/dashboard/*
+# Clear old dashboard assets (keep favicon.png)
+rm -rf internal/dashboard/dashboard/assets/
+rm -f internal/dashboard/dashboard/dashboard.html
 
 # Copy React build
 cp -r dashboard/dist/* internal/dashboard/dashboard/

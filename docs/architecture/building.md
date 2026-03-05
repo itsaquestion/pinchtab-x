@@ -163,6 +163,12 @@ go build -o pinchtab ./cmd/pinchtab
 - Produces binary: `./pinchtab`
 - Takes ~30-60 seconds
 
+> **Note:** This builds the Go server only. The dashboard will show a
+> "not built" placeholder. To include the full React dashboard, use
+> `./pdev build` instead — it builds the dashboard, compiles Go, and
+> runs the server in one step. Or run `./scripts/build-dashboard.sh`
+> before `go build`.
+
 **Verify:**
 ```bash
 ls -la pinchtab
