@@ -57,6 +57,7 @@ One tool definition, many actions — keeps context lean:
 | `snapshot` | Accessibility tree (refs for interactions) | ~3,600 (interactive) |
 | `click/type/press/fill/hover/scroll/select/focus` | Act on element by ref | — |
 | `text` | Extract readable text (cheapest) | ~800 |
+| `article_markdown` | One-shot article extraction → clean Markdown (auto H1 title fix) | ~800-1.5K |
 | `tabs` | List/open/close tabs | — |
 | `screenshot` | JPEG screenshot (vision fallback) | ~2K |
 | `evaluate` | Run JavaScript in page | — |
@@ -74,11 +75,11 @@ One tool definition, many actions — keeps context lean:
 5. pinchtab({ action: "press", key: "Enter" })
 6. pinchtab({ action: "snapshot", diff: true, format: "compact" })
    → Only changes since last snapshot
-7. pinchtab({ action: "text" })
-   → Readable results (~800 tokens)
+7. pinchtab({ action: "article_markdown" })
+   → Clean article Markdown with auto `# Title` fallback
 ```
 
-**Token strategy:** `text` for reading, `snapshot` with `filter=interactive&format=compact` for interactions, `diff=true` on subsequent snapshots, `screenshot` only for visual verification.
+**Token strategy:** For reading pages, prefer `article_markdown` first, then `text`; use `snapshot` with `filter=interactive&format=compact` for interactions, `diff=true` on subsequent snapshots, and `screenshot` only for visual verification.
 
 ## Security Notes
 

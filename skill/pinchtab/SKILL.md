@@ -105,6 +105,14 @@ pinchtab eval "document.title"         # run JavaScript
 pinchtab pdf --tab TAB_ID -o page.pdf  # export PDF
 ```
 
+### OpenClaw plugin action: `article_markdown`
+
+When using the OpenClaw `pinchtab` tool, prefer:
+
+- `action: "article_markdown"`
+
+It performs one-shot article extraction from the current page (or a given `tabId`) and returns clean Markdown. If the first non-empty line is not an H1, it auto-prepends `# <page title>`.
+
 For the full HTTP API (curl examples, download, upload, cookies, stealth, batch actions, PDF export with full parameter control), see [references/api.md](references/api.md).
 
 ## Token Cost Guide
@@ -119,7 +127,7 @@ For the full HTTP API (curl examples, download, upload, cookies, stealth, batch 
 | `/screenshot` | ~2K (vision) | Visual verification |
 | `/tabs/{id}/pdf` | 0 (binary) | Export page as PDF (no token cost) |
 
-**Strategy**: Start with `?filter=interactive&format=compact`. Use `?diff=true` on subsequent snapshots. Use `/text` when you only need readable content. Full `/snapshot` only when needed.
+**Strategy**: Start with `?filter=interactive&format=compact`. Use `?diff=true` on subsequent snapshots. For page reading, prefer plugin action `article_markdown` (one-shot clean Markdown), then fall back to `/text`. Full `/snapshot` only when needed.
 
 ## Agent Optimization
 

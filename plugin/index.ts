@@ -70,6 +70,159 @@ function textResult(data: any): any {
   return { content: [{ type: "text", text }] };
 }
 
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function htmlToMarkdown(html: string): string {
+  if (!html || typeof html !== "string") return "";
+
+  let md = html;
+
+  // Remove non-content blocks.
+  md = md
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gis, "")
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gis, "")
+    .replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gis, "");
+
+  // Preserve code blocks early.
+  md = md.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, (_m, code) => {
+    const clean = decodeHtmlEntities(String(code).replace(/<[^>]+>/g, "")).trim();
+    return `\n\n\`\`\`\n${clean}\n\`\`\`\n\n`;
+  });
+
+  // Links.
+  md = md.replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, label) => {
+    const cleanLabel = decodeHtmlEntities(String(label).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+    return cleanLabel ? `[${cleanLabel}](${href})` : href;
+  });
+
+  // Headings.
+  for (let i = 6; i >= 1; i -= 1) {
+    const hashes = "#".repeat(i);
+    const re = new RegExp(`<h${i}[^>]*>([\\s\\S]*?)<\\/h${i}>`, "gi");
+    md = md.replace(re, (_m, content) => {
+      const clean = decodeHtmlEntities(String(content).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+      return clean ? `\n\n${hashes} ${clean}\n\n` : "\n\n";
+    });
+  }
+
+  // Inline emphasis.
+  md = md
+    .replace(/<(strong|b)[^>]*>([\s\S]*?)<\/(strong|b)>/gi, "**$2**")
+    .replace(/<(em|i)[^>]*>([\s\S]*?)<\/(em|i)>/gi, "*$2*")
+    .replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, "`$1`");
+
+  // Lists.
+  md = md
+    .replace(/<li[^>]*>/gi, "\n- ")
+    .replace(/<\/(ul|ol)>/gi, "\n\n");
+
+  // Line breaks + paragraphs/blocks.
+  md = md
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|section|article|main|header|footer|aside|blockquote)>/gi, "\n\n");
+
+  // Remove remaining tags.
+  md = md.replace(/<[^>]+>/g, " ");
+
+  md = decodeHtmlEntities(md)
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+
+  return md;
+}
+
+function ensureH1(markdown: string, title?: string): string {
+  const body = (markdown || "").trim();
+  const firstNonEmpty = body.split(/\r?\n/).find((line) => line.trim().length > 0) || "";
+  const hasH1 = /^#\s+\S/.test(firstNonEmpty);
+  if (hasH1) return body;
+
+  const cleanTitle = (title || "").replace(/\s+/g, " ").trim() || "Untitled";
+  return `# ${cleanTitle}\n\n${body}`.trim();
+}
+
+async function extractArticleMarkdown(cfg: PluginConfig, params: any): Promise<{ text: string } | { error: string; body?: string }> {
+  const query = new URLSearchParams();
+  if (params.tabId) query.set("tabId", params.tabId);
+  query.set("mode", "readability");
+
+  // Prefer /text endpoint first (keeps compatibility with current plugin behavior).
+  let textPayload = await pinchtabFetch(cfg, `/text?${query.toString()}`);
+
+  // Fallback for APIs that require explicit tab route.
+  if (textPayload?.error && params.tabId) {
+    textPayload = await pinchtabFetch(cfg, `/tabs/${params.tabId}/text?mode=readability`);
+  }
+
+  if (textPayload?.error) {
+    return textPayload;
+  }
+
+  const titleFromText = typeof textPayload?.title === "string" ? textPayload.title : "";
+  const urlFromText = typeof textPayload?.url === "string" ? textPayload.url : "";
+  const readableText = typeof textPayload?.text === "string" ? textPayload.text : "";
+
+  // Try to extract readable HTML + title from page for better Markdown structure.
+  const expression = `(() => {
+    const root = document.querySelector('article, main, [role="main"], .article, .post, .entry-content, .content') || document.body;
+    return {
+      title: document.title || '',
+      url: location.href || '',
+      html: root ? root.innerHTML : ''
+    };
+  })()`;
+
+  let evalPayload: any = null;
+  if (params.tabId) {
+    evalPayload = await pinchtabFetch(cfg, `/tabs/${params.tabId}/evaluate`, { body: { expression } });
+    if (evalPayload?.error) {
+      evalPayload = await pinchtabFetch(cfg, "/evaluate", { body: { expression, tabId: params.tabId } });
+    }
+  } else {
+    evalPayload = await pinchtabFetch(cfg, "/evaluate", { body: { expression } });
+  }
+
+  const evalResult = evalPayload?.result && typeof evalPayload.result === "object" ? evalPayload.result : null;
+  const html = typeof evalResult?.html === "string" ? evalResult.html : "";
+  const title =
+    (typeof evalResult?.title === "string" && evalResult.title.trim()) ||
+    (typeof titleFromText === "string" && titleFromText.trim()) ||
+    "Untitled";
+  const url =
+    (typeof evalResult?.url === "string" && evalResult.url.trim()) ||
+    (typeof urlFromText === "string" && urlFromText.trim()) ||
+    "";
+
+  let markdown = htmlToMarkdown(html);
+
+  // Fallback: if HTML conversion yielded too little, convert readable text into basic Markdown paragraphs.
+  if (!markdown || markdown.length < 32) {
+    markdown = (readableText || "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  markdown = ensureH1(markdown, title);
+
+  // Add source URL if useful and missing.
+  if (url && !markdown.includes(url)) {
+    markdown = `${markdown}\n\nSource: ${url}`.trim();
+  }
+
+  return { text: markdown };
+}
+
 export default function register(api: PluginApi) {
   api.registerTool(
     {
@@ -79,13 +232,14 @@ export default function register(api: PluginApi) {
 - snapshot: accessibility tree (filter?, format?, selector?, maxTokens?, depth?, diff?, tabId?)
 - click/type/press/fill/hover/scroll/select/focus: act on element (ref, text?, key?, value?, scrollY?, waitNav?, tabId?)
 - text: extract readable text (mode?, tabId?)
+- article_markdown: extract clean article markdown in one call (tabId?)
 - tabs: list/new/close tabs (tabAction?, url?, tabId?)
 - screenshot: JPEG screenshot (quality?, tabId?)
 - evaluate: run JS (expression, tabId?)
 - pdf: export page as PDF (landscape?, scale?, tabId?)
 - health: check connectivity
 
-Token strategy: use "text" for reading (~800 tokens), "snapshot" with filter=interactive&format=compact for interactions (~3,600), diff=true on subsequent snapshots.`,
+Token strategy: prefer "article_markdown" or "text" for reading (~800), use "snapshot" with filter=interactive&format=compact for interactions (~3,600), and diff=true on subsequent snapshots.`,
       parameters: {
         type: "object",
         properties: {
@@ -103,6 +257,7 @@ Token strategy: use "text" for reading (~800 tokens), "snapshot" with filter=int
               "select",
               "focus",
               "text",
+              "article_markdown",
               "tabs",
               "screenshot",
               "evaluate",
@@ -250,6 +405,11 @@ Token strategy: use "text" for reading (~800 tokens), "snapshot" with filter=int
           return textResult(
             await pinchtabFetch(cfg, `/text${qs ? `?${qs}` : ""}`),
           );
+        }
+
+        // --- article_markdown ---
+        if (action === "article_markdown") {
+          return textResult(await extractArticleMarkdown(cfg, params));
         }
 
         // --- tabs ---
