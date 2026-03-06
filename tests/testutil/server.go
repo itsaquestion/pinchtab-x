@@ -52,10 +52,13 @@ func DefaultConfig() ServerConfig {
 		port = "19867"
 	}
 	return ServerConfig{
-		Port:          port,
-		Headless:      true,
-		Stealth:       "light",
-		AllowEvaluate: true, // tests need evaluate for assertions
+		Port:            port,
+		Headless:        true,
+		Stealth:         "light",
+		AllowEvaluate:   true, // tests need evaluate for assertions
+		AllowDownload:   true, // tests validate download error handling
+		AllowUpload:     true, // tests validate upload error handling
+		AllowScreencast: true, // orchestrator uses /screencast/tabs to fetch tabs
 	}
 }
 
@@ -124,6 +127,7 @@ func StartServer(cfg ServerConfig) (*Server, error) {
 		"PINCHTAB_STEALTH="+cfg.Stealth,
 		"PINCHTAB_STATE_DIR="+s.StateDir,
 		"PINCHTAB_PROFILE_DIR="+s.ProfileDir,
+		"PINCHTAB_CONFIG="+filepath.Join(s.Dir, "config.json"), // Isolate from host config
 	)
 
 	// Security flags from ServerConfig

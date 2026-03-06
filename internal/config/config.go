@@ -389,8 +389,8 @@ func Load() *RuntimeConfig {
 		// Server defaults + env vars
 		Bind:              envOrMigrate("PINCHTAB_BIND", "BRIDGE_BIND", "127.0.0.1"),
 		Port:              envOrMigrate("PINCHTAB_PORT", "BRIDGE_PORT", "9867"),
-		InstancePortStart: envIntOr("PINCHTAB_INSTANCE_PORT_START", 9868),
-		InstancePortEnd:   envIntOr("PINCHTAB_INSTANCE_PORT_END", 9968),
+		InstancePortStart: envIntOrMigrate("PINCHTAB_INSTANCE_PORT_START", "INSTANCE_PORT_START", 9868),
+		InstancePortEnd:   envIntOrMigrate("PINCHTAB_INSTANCE_PORT_END", "INSTANCE_PORT_END", 9968),
 		CdpURL:            os.Getenv("CDP_URL"),
 		Token:             envMigrate("PINCHTAB_TOKEN", "BRIDGE_TOKEN"),
 		StateDir:          envOrMigrate("PINCHTAB_STATE_DIR", "BRIDGE_STATE_DIR", userConfigDir()),
@@ -481,10 +481,10 @@ func applyFileConfig(cfg *RuntimeConfig, fc *FileConfig) {
 	if fc.Server.CdpURL != "" && os.Getenv("CDP_URL") == "" {
 		cfg.CdpURL = fc.Server.CdpURL
 	}
-	if fc.Server.InstancePortStart != nil && os.Getenv("PINCHTAB_INSTANCE_PORT_START") == "" {
+	if fc.Server.InstancePortStart != nil && !envMigrateIsSet("PINCHTAB_INSTANCE_PORT_START", "INSTANCE_PORT_START") {
 		cfg.InstancePortStart = *fc.Server.InstancePortStart
 	}
-	if fc.Server.InstancePortEnd != nil && os.Getenv("PINCHTAB_INSTANCE_PORT_END") == "" {
+	if fc.Server.InstancePortEnd != nil && !envMigrateIsSet("PINCHTAB_INSTANCE_PORT_END", "INSTANCE_PORT_END") {
 		cfg.InstancePortEnd = *fc.Server.InstancePortEnd
 	}
 
