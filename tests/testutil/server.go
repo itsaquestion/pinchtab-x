@@ -22,10 +22,16 @@ const (
 	InstanceTimeout = 30 * time.Second
 )
 
+// ServerConfig mirrors key fields from internal/config.RuntimeConfig for test setup.
+// Only includes fields commonly overridden in tests.
 type ServerConfig struct {
-	Port     string // default: "19867"
-	Headless bool   // default: true
-	Stealth  string // default: "light"
+	Port              string // default: "19867"
+	Headless          bool   // default: true
+	Stealth           string // default: "light"
+	TabEvictionPolicy string // default: "" (uses config default: "reject")
+	Strategy          string // default: "" (uses config default: "simple")
+	AllocationPolicy  string // default: "" (uses config default: "fcfs")
+	MaxTabs           int    // default: 0 (uses config default: 20)
 }
 
 func DefaultConfig() ServerConfig {
@@ -104,6 +110,19 @@ func StartServer(cfg ServerConfig) (*Server, error) {
 		"PINCHTAB_STATE_DIR="+s.StateDir,
 		"PINCHTAB_PROFILE_DIR="+s.ProfileDir,
 	)
+	// Optional config overrides
+	if cfg.TabEvictionPolicy != "" {
+		env = append(env, "PINCHTAB_TAB_EVICTION_POLICY="+cfg.TabEvictionPolicy)
+	}
+	if cfg.Strategy != "" {
+		env = append(env, "PINCHTAB_STRATEGY="+cfg.Strategy)
+	}
+	if cfg.AllocationPolicy != "" {
+		env = append(env, "PINCHTAB_ALLOCATION_POLICY="+cfg.AllocationPolicy)
+	}
+	if cfg.MaxTabs > 0 {
+		env = append(env, fmt.Sprintf("PINCHTAB_MAX_TABS=%d", cfg.MaxTabs))
+	}
 	if bin := os.Getenv("CHROME_BINARY"); bin != "" {
 		env = append(env, "CHROME_BINARY="+bin)
 	}
