@@ -46,7 +46,7 @@ jobs:
 
       - name: Generate dashboard types
         run: |
-          "$HOME/go/bin/tygo" generate
+          $HOME/go/bin/tygo generate
           git diff --exit-code -- src/generated/types.ts
 
       - name: Install dependencies
@@ -85,7 +85,7 @@ jobs:
         run: go install github.com/gzuidhof/tygo@latest
 
       - name: Generate dashboard types
-        run: "$HOME/go/bin/tygo" generate
+        run: $HOME/go/bin/tygo generate
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
