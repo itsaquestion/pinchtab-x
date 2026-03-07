@@ -82,6 +82,10 @@ ENVIRONMENT:
   BRIDGE_PORT          Server port (default: 9867)
   BRIDGE_HEADLESS      Run Chrome headless (default: true)
 
+FLAGS (global, place before or after command):
+  --instance <id>      Target a specific instance by ID (e.g., pinchtab nav --instance abc123 https://...)
+  -I <id>              Alias for --instance
+
 Examples:
   pinchtab nav https://pinchtab.com
   pinchtab snap -i -c
@@ -113,16 +117,34 @@ func isCLICommand(cmd string) bool {
 
 func runCLI(cfg *config.RuntimeConfig) {
 	cmd := os.Args[1]
-	args := os.Args[2:]
+	rawArgs := os.Args[2:]
 
-	base := fmt.Sprintf("http://%s:%s", cfg.Bind, cfg.Port)
+	// Extract --instance/-I flag and strip it from args so sub-commands don't see it.
+	var instanceID string
+	args := make([]string, 0, len(rawArgs))
+	for i := 0; i < len(rawArgs); i++ {
+		if (rawArgs[i] == "--instance" || rawArgs[i] == "-I") && i+1 < len(rawArgs) {
+			instanceID = rawArgs[i+1]
+			i++ // skip the value
+		} else {
+			args = append(args, rawArgs[i])
+		}
+	}
+
+	orchBase := fmt.Sprintf("http://%s:%s", cfg.Bind, cfg.Port)
 	if envURL := os.Getenv("PINCHTAB_URL"); envURL != "" {
-		base = strings.TrimRight(envURL, "/")
+		orchBase = strings.TrimRight(envURL, "/")
 	}
 
 	token := cfg.Token
 	if envToken := os.Getenv("PINCHTAB_TOKEN"); envToken != "" {
 		token = envToken
+	}
+
+	// --instance resolves the target base URL from the named instance's port.
+	base := orchBase
+	if instanceID != "" {
+		base = resolveInstanceBase(orchBase, token, instanceID, cfg.Bind)
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -216,6 +238,9 @@ Commands:
 Environment:
   PINCHTAB_URL            Server URL (default: http://localhost:9867)
   PINCHTAB_TOKEN          Auth token (sent as Bearer)
+
+Flags (global):
+  --instance <id>, -I <id>  Target a specific instance (e.g., pinchtab snap --instance abc123)
 
 Pipe with jq:
   pinchtab snap -i | jq '.nodes[] | select(.role=="link")'
@@ -1283,6 +1308,24 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// resolveInstanceBase fetches the named instance from the orchestrator and returns
+// a base URL pointing directly at that instance's API port.
+func resolveInstanceBase(orchBase, token, instanceID, bind string) string {
+	c := &http.Client{Timeout: 10 * time.Second}
+	body := doGetRaw(c, orchBase, token, fmt.Sprintf("/instances/%s", instanceID), nil)
+
+	var inst struct {
+		Port string `json:"port"`
+	}
+	if err := json.Unmarshal(body, &inst); err != nil {
+		fatal("failed to parse instance %q: %v", instanceID, err)
+	}
+	if inst.Port == "" {
+		fatal("instance %q has no port assigned (is it still starting?)", instanceID)
+	}
+	return fmt.Sprintf("http://%s:%s", bind, inst.Port)
 }
 
 func fatal(format string, args ...any) {

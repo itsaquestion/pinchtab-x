@@ -349,3 +349,137 @@ func TestParseBool(t *testing.T) {
 		})
 	}
 }
+
+// --- GetConfigValue ---
+
+func TestGetConfigValue_RoundTrip(t *testing.T) {
+	// For every path that SetConfigValue accepts, GetConfigValue must return
+	// a string that parses back to the same value.
+	triples := []struct {
+		path  string
+		value string
+		want  string // what GetConfigValue should return
+	}{
+		{"server.port", "8080", "8080"},
+		{"server.bind", "0.0.0.0", "0.0.0.0"},
+		{"server.token", "s3cr3t", "s3cr3t"},
+		{"server.stateDir", "/tmp/state", "/tmp/state"},
+		{"browser.version", "120.0", "120.0"},
+		{"browser.binary", "/usr/bin/chrome", "/usr/bin/chrome"},
+		{"instanceDefaults.mode", "headed", "headed"},
+		{"instanceDefaults.noRestore", "true", "true"},
+		{"instanceDefaults.blockImages", "false", "false"},
+		{"instanceDefaults.blockAds", "1", "true"}, // normalised by parseBool then formatBoolPtr
+		{"instanceDefaults.maxTabs", "50", "50"},
+		{"instanceDefaults.maxParallelTabs", "8", "8"},
+		{"instanceDefaults.userAgent", "MyBot/1.0", "MyBot/1.0"},
+		{"instanceDefaults.stealthLevel", "full", "full"},
+		{"instanceDefaults.tabEvictionPolicy", "close_lru", "close_lru"},
+		{"security.allowEvaluate", "true", "true"},
+		{"security.allowMacro", "false", "false"},
+		{"security.allowScreencast", "on", "true"},
+		{"security.allowDownload", "off", "false"},
+		{"security.allowUpload", "yes", "true"},
+		{"profiles.baseDir", "/profiles", "/profiles"},
+		{"profiles.defaultProfile", "agent", "agent"},
+		{"multiInstance.strategy", "explicit", "explicit"},
+		{"multiInstance.allocationPolicy", "round_robin", "round_robin"},
+		{"multiInstance.instancePortStart", "9900", "9900"},
+		{"multiInstance.instancePortEnd", "9950", "9950"},
+		{"attach.enabled", "true", "true"},
+		{"timeouts.actionSec", "60", "60"},
+		{"timeouts.navigateSec", "90", "90"},
+		{"timeouts.shutdownSec", "15", "15"},
+		{"timeouts.waitNavMs", "3000", "3000"},
+	}
+
+	for _, tt := range triples {
+		t.Run(tt.path, func(t *testing.T) {
+			fc := &FileConfig{}
+			if err := SetConfigValue(fc, tt.path, tt.value); err != nil {
+				t.Fatalf("SetConfigValue(%q, %q) error = %v", tt.path, tt.value, err)
+			}
+			got, err := GetConfigValue(fc, tt.path)
+			if err != nil {
+				t.Fatalf("GetConfigValue(%q) error = %v", tt.path, err)
+			}
+			if got != tt.want {
+				t.Errorf("GetConfigValue(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetConfigValue_NilPointerReturnsEmpty(t *testing.T) {
+	fc := &FileConfig{}
+	// Pointer fields that have not been set should return "".
+	ptrs := []string{
+		"instanceDefaults.noRestore",
+		"instanceDefaults.blockImages",
+		"instanceDefaults.blockMedia",
+		"instanceDefaults.blockAds",
+		"instanceDefaults.maxTabs",
+		"instanceDefaults.maxParallelTabs",
+		"instanceDefaults.noAnimations",
+		"security.allowEvaluate",
+		"security.allowMacro",
+		"security.allowScreencast",
+		"security.allowDownload",
+		"security.allowUpload",
+		"multiInstance.instancePortStart",
+		"multiInstance.instancePortEnd",
+		"attach.enabled",
+	}
+	for _, path := range ptrs {
+		t.Run(path, func(t *testing.T) {
+			got, err := GetConfigValue(fc, path)
+			if err != nil {
+				t.Fatalf("GetConfigValue(%q) unexpected error: %v", path, err)
+			}
+			if got != "" {
+				t.Errorf("GetConfigValue(%q) = %q, want empty string for unset pointer", path, got)
+			}
+		})
+	}
+}
+
+func TestGetConfigValue_AttachSlices(t *testing.T) {
+	fc := &FileConfig{}
+	fc.Attach.AllowHosts = []string{"127.0.0.1", "localhost"}
+	fc.Attach.AllowSchemes = []string{"ws", "wss"}
+
+	hosts, err := GetConfigValue(fc, "attach.allowHosts")
+	if err != nil {
+		t.Fatalf("GetConfigValue(attach.allowHosts) error = %v", err)
+	}
+	if hosts != "127.0.0.1,localhost" {
+		t.Errorf("allowHosts = %q, want %q", hosts, "127.0.0.1,localhost")
+	}
+
+	schemes, err := GetConfigValue(fc, "attach.allowSchemes")
+	if err != nil {
+		t.Fatalf("GetConfigValue(attach.allowSchemes) error = %v", err)
+	}
+	if schemes != "ws,wss" {
+		t.Errorf("allowSchemes = %q, want %q", schemes, "ws,wss")
+	}
+}
+
+func TestGetConfigValue_UnknownPaths(t *testing.T) {
+	fc := &FileConfig{}
+	errorCases := []string{
+		"port",            // missing section
+		"",                // empty
+		"unknown.field",   // unknown section
+		"server.ghost",    // unknown field in known section
+		"attach.badfield", // unknown attach field
+	}
+	for _, path := range errorCases {
+		t.Run(path, func(t *testing.T) {
+			_, err := GetConfigValue(fc, path)
+			if err == nil {
+				t.Errorf("GetConfigValue(%q) should have returned an error", path)
+			}
+		})
+	}
+}

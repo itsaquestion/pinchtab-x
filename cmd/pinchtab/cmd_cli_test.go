@@ -651,3 +651,37 @@ func TestCheckServerAndGuide(t *testing.T) {
 		t.Error("expected auth error message")
 	}
 }
+
+// TestResolveInstanceBase verifies that --instance resolves the correct base URL
+// from the orchestrator's /instances/<id> response.
+func TestResolveInstanceBase(t *testing.T) {
+	// Orchestrator mock returns an instance with port 9901.
+	orch := newMockServer()
+	orch.response = `{"id":"abc123","port":"9901","status":"running"}`
+	defer orch.close()
+	client := orch.server.Client()
+	_ = client // resolveInstanceBase builds its own client
+
+	got := resolveInstanceBase(orch.base(), "", "abc123", "127.0.0.1")
+
+	if orch.lastPath != "/instances/abc123" {
+		t.Errorf("expected GET /instances/abc123, got %s", orch.lastPath)
+	}
+	if got != "http://127.0.0.1:9901" {
+		t.Errorf("resolveInstanceBase = %q, want %q", got, "http://127.0.0.1:9901")
+	}
+}
+
+// TestResolveInstanceBase_ForwardsToken verifies that the auth token is sent to the orchestrator.
+func TestResolveInstanceBase_ForwardsToken(t *testing.T) {
+	orch := newMockServer()
+	orch.response = `{"id":"xyz","port":"9902","status":"running"}`
+	defer orch.close()
+
+	resolveInstanceBase(orch.base(), "my-token", "xyz", "localhost")
+
+	authHeader := orch.lastHeaders.Get("Authorization")
+	if authHeader != "Bearer my-token" {
+		t.Errorf("Authorization header = %q, want %q", authHeader, "Bearer my-token")
+	}
+}

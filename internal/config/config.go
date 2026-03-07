@@ -748,6 +748,8 @@ func HandleConfigCommand(cfg *RuntimeConfig) {
 		handleConfigPath()
 	case "validate":
 		handleConfigValidate()
+	case "get":
+		handleConfigGet()
 	case "set":
 		handleConfigSet()
 	case "patch":
@@ -767,8 +769,39 @@ func printConfigUsage() {
 	fmt.Println("  show              Show current configuration")
 	fmt.Println("  path              Show config file path")
 	fmt.Println("  validate          Validate config file")
+	fmt.Println("  get <path>        Get a config value (e.g., server.port)")
 	fmt.Println("  set <path> <val>  Set a config value (e.g., server.port 8080)")
 	fmt.Println("  patch <json>      Merge JSON into config")
+}
+
+func handleConfigGet() {
+	if len(os.Args) < 4 {
+		fmt.Println("Usage: pinchtab config get <path>")
+		fmt.Println()
+		fmt.Println("Examples:")
+		fmt.Println("  pinchtab config get server.port")
+		fmt.Println("  pinchtab config get instanceDefaults.mode")
+		fmt.Println("  pinchtab config get attach.allowHosts")
+		fmt.Println()
+		fmt.Println("Sections: server, browser, instanceDefaults, security, profiles, multiInstance, attach, timeouts")
+		os.Exit(1)
+	}
+
+	path := os.Args[3]
+
+	fc, _, err := LoadFileConfig()
+	if err != nil {
+		fmt.Printf("Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	value, err := GetConfigValue(fc, path)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println(value)
 }
 
 func handleConfigInit() {

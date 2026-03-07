@@ -292,3 +292,82 @@ func filterTestEnv() []string {
 	}
 	return out
 }
+
+// TestConfigCLI_Get tests `pinchtab config get`
+func TestConfigCLI_Get(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+
+	// Initialize config, then set a known value.
+	initCmd := exec.Command(server.BinaryPath, "config", "init")
+	initCmd.Env = append(filterTestEnv(), "PINCHTAB_CONFIG="+configPath, "HOME="+tmpDir)
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("config init failed: %v\nOutput: %s", err, out)
+	}
+
+	setCmd := exec.Command(server.BinaryPath, "config", "set", "server.port", "7654")
+	setCmd.Env = append(filterTestEnv(), "PINCHTAB_CONFIG="+configPath)
+	if out, err := setCmd.CombinedOutput(); err != nil {
+		t.Fatalf("config set failed: %v\nOutput: %s", err, out)
+	}
+
+	// Get the value back.
+	getCmd := exec.Command(server.BinaryPath, "config", "get", "server.port")
+	getCmd.Env = append(filterTestEnv(), "PINCHTAB_CONFIG="+configPath)
+
+	out, err := getCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("config get failed: %v\nOutput: %s", err, out)
+	}
+
+	got := strings.TrimSpace(string(out))
+	if got != "7654" {
+		t.Errorf("config get server.port = %q, want %q", got, "7654")
+	}
+}
+
+// TestConfigCLI_Get_UnknownPath tests that `pinchtab config get` exits non-zero for unknown paths.
+func TestConfigCLI_Get_UnknownPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+
+	cmd := exec.Command(server.BinaryPath, "config", "get", "unknown.field")
+	cmd.Env = append(filterTestEnv(), "PINCHTAB_CONFIG="+configPath)
+
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("config get unknown.field should have failed; got: %s", out)
+	}
+}
+
+// TestConfigCLI_Get_SliceField tests that slice fields (e.g., attach.allowHosts)
+// are returned as comma-separated values.
+func TestConfigCLI_Get_SliceField(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+
+	initCmd := exec.Command(server.BinaryPath, "config", "init")
+	initCmd.Env = append(filterTestEnv(), "PINCHTAB_CONFIG="+configPath, "HOME="+tmpDir)
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("config init failed: %v\nOutput: %s", err, out)
+	}
+
+	setCmd := exec.Command(server.BinaryPath, "config", "set", "attach.allowHosts", "127.0.0.1,localhost")
+	setCmd.Env = append(filterTestEnv(), "PINCHTAB_CONFIG="+configPath)
+	if out, err := setCmd.CombinedOutput(); err != nil {
+		t.Fatalf("config set failed: %v\nOutput: %s", err, out)
+	}
+
+	getCmd := exec.Command(server.BinaryPath, "config", "get", "attach.allowHosts")
+	getCmd.Env = append(filterTestEnv(), "PINCHTAB_CONFIG="+configPath)
+
+	out, err := getCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("config get attach.allowHosts failed: %v\nOutput: %s", err, out)
+	}
+
+	got := strings.TrimSpace(string(out))
+	if got != "127.0.0.1,localhost" {
+		t.Errorf("config get attach.allowHosts = %q, want %q", got, "127.0.0.1,localhost")
+	}
+}

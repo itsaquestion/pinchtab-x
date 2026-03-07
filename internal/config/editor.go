@@ -229,6 +229,187 @@ func setAttachField(a *AttachConfig, field, value string) error {
 	return nil
 }
 
+// GetConfigValue reads a dotted-path field from FileConfig and returns its string representation.
+// The path format matches SetConfigValue (e.g., "server.port", "attach.allowHosts").
+// Pointer fields that are unset return an empty string.
+// Slice fields are returned as comma-separated values.
+func GetConfigValue(fc *FileConfig, path string) (string, error) {
+	parts := strings.SplitN(path, ".", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid path %q (expected section.field, e.g., server.port)", path)
+	}
+
+	section, field := parts[0], parts[1]
+
+	switch section {
+	case "server":
+		return getServerField(&fc.Server, field)
+	case "browser":
+		return getBrowserField(&fc.Browser, field)
+	case "instanceDefaults":
+		return getInstanceDefaultsField(&fc.InstanceDefaults, field)
+	case "security":
+		return getSecurityField(&fc.Security, field)
+	case "profiles":
+		return getProfilesField(&fc.Profiles, field)
+	case "multiInstance":
+		return getMultiInstanceField(&fc.MultiInstance, field)
+	case "attach":
+		return getAttachField(&fc.Attach, field)
+	case "timeouts":
+		return getTimeoutsField(&fc.Timeouts, field)
+	default:
+		return "", fmt.Errorf("unknown section %q (valid: server, browser, instanceDefaults, security, profiles, multiInstance, attach, timeouts)", section)
+	}
+}
+
+func getServerField(s *ServerConfig, field string) (string, error) {
+	switch field {
+	case "port":
+		return s.Port, nil
+	case "bind":
+		return s.Bind, nil
+	case "token":
+		return s.Token, nil
+	case "stateDir":
+		return s.StateDir, nil
+	default:
+		return "", fmt.Errorf("unknown field server.%s", field)
+	}
+}
+
+func getBrowserField(b *BrowserConfig, field string) (string, error) {
+	switch field {
+	case "version":
+		return b.ChromeVersion, nil
+	case "binary":
+		return b.ChromeBinary, nil
+	case "extraFlags":
+		return b.ChromeExtraFlags, nil
+	default:
+		return "", fmt.Errorf("unknown field browser.%s", field)
+	}
+}
+
+func getInstanceDefaultsField(c *InstanceDefaultsConfig, field string) (string, error) {
+	switch field {
+	case "mode":
+		return c.Mode, nil
+	case "noRestore":
+		return formatBoolPtr(c.NoRestore), nil
+	case "timezone":
+		return c.Timezone, nil
+	case "blockImages":
+		return formatBoolPtr(c.BlockImages), nil
+	case "blockMedia":
+		return formatBoolPtr(c.BlockMedia), nil
+	case "blockAds":
+		return formatBoolPtr(c.BlockAds), nil
+	case "maxTabs":
+		return formatIntPtr(c.MaxTabs), nil
+	case "maxParallelTabs":
+		return formatIntPtr(c.MaxParallelTabs), nil
+	case "userAgent":
+		return c.UserAgent, nil
+	case "noAnimations":
+		return formatBoolPtr(c.NoAnimations), nil
+	case "stealthLevel":
+		return c.StealthLevel, nil
+	case "tabEvictionPolicy":
+		return c.TabEvictionPolicy, nil
+	default:
+		return "", fmt.Errorf("unknown field instanceDefaults.%s", field)
+	}
+}
+
+func getSecurityField(s *SecurityConfig, field string) (string, error) {
+	switch field {
+	case "allowEvaluate":
+		return formatBoolPtr(s.AllowEvaluate), nil
+	case "allowMacro":
+		return formatBoolPtr(s.AllowMacro), nil
+	case "allowScreencast":
+		return formatBoolPtr(s.AllowScreencast), nil
+	case "allowDownload":
+		return formatBoolPtr(s.AllowDownload), nil
+	case "allowUpload":
+		return formatBoolPtr(s.AllowUpload), nil
+	default:
+		return "", fmt.Errorf("unknown field security.%s", field)
+	}
+}
+
+func getProfilesField(p *ProfilesConfig, field string) (string, error) {
+	switch field {
+	case "baseDir":
+		return p.BaseDir, nil
+	case "defaultProfile":
+		return p.DefaultProfile, nil
+	default:
+		return "", fmt.Errorf("unknown field profiles.%s", field)
+	}
+}
+
+func getMultiInstanceField(o *MultiInstanceConfig, field string) (string, error) {
+	switch field {
+	case "strategy":
+		return o.Strategy, nil
+	case "allocationPolicy":
+		return o.AllocationPolicy, nil
+	case "instancePortStart":
+		return formatIntPtr(o.InstancePortStart), nil
+	case "instancePortEnd":
+		return formatIntPtr(o.InstancePortEnd), nil
+	default:
+		return "", fmt.Errorf("unknown field multiInstance.%s", field)
+	}
+}
+
+func getAttachField(a *AttachConfig, field string) (string, error) {
+	switch field {
+	case "enabled":
+		return formatBoolPtr(a.Enabled), nil
+	case "allowHosts":
+		return strings.Join(a.AllowHosts, ","), nil
+	case "allowSchemes":
+		return strings.Join(a.AllowSchemes, ","), nil
+	default:
+		return "", fmt.Errorf("unknown field attach.%s", field)
+	}
+}
+
+func getTimeoutsField(t *TimeoutsConfig, field string) (string, error) {
+	switch field {
+	case "actionSec":
+		return strconv.Itoa(t.ActionSec), nil
+	case "navigateSec":
+		return strconv.Itoa(t.NavigateSec), nil
+	case "shutdownSec":
+		return strconv.Itoa(t.ShutdownSec), nil
+	case "waitNavMs":
+		return strconv.Itoa(t.WaitNavMs), nil
+	default:
+		return "", fmt.Errorf("unknown field timeouts.%s", field)
+	}
+}
+
+func formatBoolPtr(b *bool) string {
+	if b == nil {
+		return ""
+	}
+	if *b {
+		return "true"
+	}
+	return "false"
+}
+
+func formatIntPtr(n *int) string {
+	if n == nil {
+		return ""
+	}
+	return strconv.Itoa(*n)
+}
+
 func parseBool(s string) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "true", "1", "yes", "on":
