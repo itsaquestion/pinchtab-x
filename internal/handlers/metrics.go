@@ -35,7 +35,6 @@ func SnapshotMetrics() map[string]any {
 	return map[string]any{
 		"requestsTotal":   total,
 		"requestsFailed":  failed,
-		"panicsRecovered": atomic.LoadUint64(&metricPanicsRecovered),
 		"avgLatencyMs":    avgMs,
 		"rateLimited":     atomic.LoadUint64(&metricRateLimited),
 		"staleRefRetries": atomic.LoadUint64(&metricStaleRefRetries),

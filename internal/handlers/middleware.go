@@ -22,7 +22,6 @@ var (
 	metricRequestLatencyN uint64
 	metricRateLimited     uint64
 	metricStaleRefRetries uint64
-	metricPanicsRecovered uint64
 )
 
 func LoggingMiddleware(next http.Handler) http.Handler {

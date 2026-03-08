@@ -33,11 +33,6 @@ func recordFailureEvent(ev FailureEvent) {
 	}
 }
 
-// RecordRecoveredPanic increments recovered panic monitoring for bridge HTTP handlers.
-func RecordRecoveredPanic() {
-	atomic.AddUint64(&metricPanicsRecovered, 1)
-}
-
 // FailureSnapshot returns recent failure diagnostics for /health and /metrics.
 func FailureSnapshot() map[string]any {
 	failureMu.Lock()
@@ -45,9 +40,8 @@ func FailureSnapshot() map[string]any {
 	failureMu.Unlock()
 
 	return map[string]any{
-		"requestsFailed":  atomic.LoadUint64(&metricRequestsFailed),
-		"panicsRecovered": atomic.LoadUint64(&metricPanicsRecovered),
-		"recent":          recent,
+		"requestsFailed": atomic.LoadUint64(&metricRequestsFailed),
+		"recent":         recent,
 	}
 }
 
@@ -55,9 +49,7 @@ func hasFailureDiagnostics() bool {
 	failureMu.Lock()
 	recentCount := len(recentFailures)
 	failureMu.Unlock()
-	return atomic.LoadUint64(&metricRequestsFailed) > 0 ||
-		atomic.LoadUint64(&metricPanicsRecovered) > 0 ||
-		recentCount > 0
+	return atomic.LoadUint64(&metricRequestsFailed) > 0 || recentCount > 0
 }
 
 func resetObservabilityForTests() {
@@ -66,7 +58,6 @@ func resetObservabilityForTests() {
 	atomic.StoreUint64(&metricRequestLatencyN, 0)
 	atomic.StoreUint64(&metricRateLimited, 0)
 	atomic.StoreUint64(&metricStaleRefRetries, 0)
-	atomic.StoreUint64(&metricPanicsRecovered, 0)
 	failureMu.Lock()
 	recentFailures = nil
 	failureMu.Unlock()

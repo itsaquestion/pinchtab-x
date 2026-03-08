@@ -26,7 +26,7 @@ type localCmd struct {
 
 func (r *LocalRunner) Run(ctx context.Context, binary string, args []string, env []string, stdout, stderr io.Writer) (Cmd, error) {
 	runCtx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(runCtx, binary, args...)
+	cmd := exec.CommandContext(runCtx, binary, args...) // #nosec G204 -- binary is the pinchtab executable path, args are internal subcommands
 	cmd.Env = env
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
