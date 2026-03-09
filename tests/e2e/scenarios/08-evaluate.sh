@@ -12,12 +12,7 @@ start_test "pinchtab evaluate (simple expression)"
 
 pt_post /evaluate -d '{"expression":"1 + 1"}'
 assert_ok "evaluate simple"
-
-# Verify result
-VAL=$(echo "$RESULT" | jq -r '.result')
-if [ "$VAL" != "2" ]; then
-  fail "expected result=2, got $VAL"
-fi
+assert_result_eq ".result" "2" "1+1=2"
 
 end_test
 
@@ -26,11 +21,7 @@ start_test "pinchtab evaluate (DOM query)"
 
 pt_post /evaluate -d '{"expression":"document.title"}'
 assert_ok "evaluate DOM"
-
-VAL=$(echo "$RESULT" | jq -r '.result')
-if [ "$VAL" != "Evaluate Test Page" ]; then
-  fail "expected value, got $VAL"
-fi
+assert_result_eq ".result" "Evaluate Test Page" "got title"
 
 end_test
 
@@ -39,11 +30,7 @@ start_test "pinchtab evaluate (call function)"
 
 pt_post /evaluate -d '{"expression":"window.calculate.add(5, 3)"}'
 assert_ok "evaluate function"
-
-VAL=$(echo "$RESULT" | jq -r '.result')
-if [ "$VAL" != "8" ]; then
-  fail "expected value, got $VAL"
-fi
+assert_result_eq ".result" "8" "5+3=8"
 
 end_test
 
@@ -52,11 +39,7 @@ start_test "pinchtab evaluate (get object)"
 
 pt_post /evaluate -d '{"expression":"JSON.stringify(window.testData)"}'
 assert_ok "evaluate object"
-
-# Verify we got the test data
-if ! echo "$RESULT" | jq -r '.result' | jq -e '.name == "PinchTab"' >/dev/null 2>&1; then
-  fail "expected testData object"
-fi
+assert_json_contains "$RESULT" ".result" "PinchTab" "has testData"
 
 end_test
 
@@ -68,10 +51,7 @@ assert_ok "evaluate modify DOM"
 
 # Verify the change stuck
 pt_post /evaluate -d '{"expression":"document.getElementById(\"counter\").textContent"}'
-VAL=$(echo "$RESULT" | jq -r '.result')
-if [ "$VAL" != "42" ]; then
-  fail "expected value, got $VAL"
-fi
+assert_result_eq ".result" "42" "counter=42"
 
 end_test
 
@@ -86,10 +66,6 @@ sleep 1
 
 pt_post "/tabs/${TAB_ID}/evaluate" -d '{"expression":"1 + 2 + 3"}'
 assert_ok "tab evaluate"
-
-VAL=$(echo "$RESULT" | jq -r '.result')
-if [ "$VAL" != "6" ]; then
-  fail "expected value, got $VAL"
-fi
+assert_result_eq ".result" "6" "1+2+3=6"
 
 end_test
