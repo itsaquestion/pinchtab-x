@@ -2,16 +2,21 @@ package orchestrator
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/pinchtab/pinchtab/internal/handlers"
 	"github.com/pinchtab/pinchtab/internal/web"
 )
 
 // proxyTabRequest is a generic handler that proxies requests to the instance
 // that owns the tab specified in the path. Works for any /tabs/{id}/* route.
+//
+// Uses the instance Manager's Locator for O(1) cached lookups, falling back
+// to the legacy O(n×m) bridge query on cache miss.
 func (o *Orchestrator) proxyTabRequest(w http.ResponseWriter, r *http.Request) {
 	tabID := r.PathValue("id")
 	if tabID == "" {
@@ -19,10 +24,30 @@ func (o *Orchestrator) proxyTabRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fast path: Locator cache hit
+	if o.instanceMgr != nil {
+		if inst, err := o.instanceMgr.FindInstanceByTabID(tabID); err == nil {
+			targetURL := &url.URL{
+				Scheme:   "http",
+				Host:     net.JoinHostPort("localhost", inst.Port),
+				Path:     r.URL.Path,
+				RawQuery: r.URL.RawQuery,
+			}
+			o.proxyToURL(w, r, targetURL)
+			return
+		}
+	}
+
+	// Slow path: legacy lookup
 	inst, err := o.findRunningInstanceByTabID(tabID)
 	if err != nil {
 		web.Error(w, 404, err)
 		return
+	}
+
+	// Cache for future O(1) lookups
+	if o.instanceMgr != nil {
+		o.instanceMgr.Locator.Register(tabID, inst.ID)
 	}
 
 	targetURL := &url.URL{
@@ -106,7 +131,7 @@ func (o *Orchestrator) proxyToURL(w http.ResponseWriter, r *http.Request, target
 	}
 
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(readResponseBody(resp))
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // findRunningInstanceByTabID finds the instance that owns the given tab.
@@ -136,7 +161,6 @@ func (o *Orchestrator) findRunningInstanceByTabID(tabID string) (*InstanceIntern
 
 func (o *Orchestrator) handleProxyScreencast(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	tabID := r.URL.Query().Get("tabId")
 
 	o.mu.RLock()
 	inst, ok := o.instances[id]
@@ -146,26 +170,16 @@ func (o *Orchestrator) handleProxyScreencast(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	targetURL := fmt.Sprintf("ws://localhost:%s/screencast?tabId=%s", inst.Port, tabID)
-	web.JSON(w, 200, map[string]string{"wsUrl": targetURL})
-}
+	// Build target URL preserving all query params (tabId, quality, maxWidth, fps)
+	targetURL := fmt.Sprintf("http://localhost:%s/screencast?%s", inst.Port, r.URL.RawQuery)
 
-func readResponseBody(resp *http.Response) []byte {
-	if resp.Body == nil {
-		return []byte{}
+	// Inject child auth token if configured
+	if o.childAuthToken != "" {
+		r.Header.Set("Authorization", "Bearer "+o.childAuthToken)
 	}
-	body := make([]byte, 0)
-	buf := make([]byte, 4096)
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			body = append(body, buf[:n]...)
-		}
-		if err != nil {
-			break
-		}
-	}
-	return body
+
+	// Use WebSocket proxy for proper upgrade
+	handlers.ProxyWebSocket(w, r, targetURL)
 }
 
 // classifyLaunchError returns appropriate HTTP status code for launch errors.

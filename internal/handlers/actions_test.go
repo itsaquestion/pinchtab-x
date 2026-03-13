@@ -33,6 +33,10 @@ func (m *failMockBridge) AvailableActions() []string {
 	return []string{bridge.ActionClick, bridge.ActionType}
 }
 
+func (m *failMockBridge) Execute(ctx context.Context, tabID string, task func(ctx context.Context) error) error {
+	return task(ctx)
+}
+
 func TestHandleActions_EmptyArray(t *testing.T) {
 	h := New(&mockBridge{}, &config.RuntimeConfig{}, nil, nil, nil)
 	req := httptest.NewRequest("POST", "/actions", bytes.NewReader([]byte(`{"actions": []}`)))
@@ -183,7 +187,7 @@ func TestHandleSetCookies_EmptyURL(t *testing.T) {
 func TestHandleSetCookies_EmptyCookies(t *testing.T) {
 	h := New(&mockBridge{}, &config.RuntimeConfig{}, nil, nil, nil)
 
-	body := `{"url": "https://example.com", "cookies": []}`
+	body := `{"url": "https://pinchtab.com", "cookies": []}`
 	req := httptest.NewRequest("POST", "/cookies", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -250,7 +254,7 @@ func TestHandleAction_GetMissingKind(t *testing.T) {
 }
 
 func TestHandleMacro_EmptySteps(t *testing.T) {
-	h := New(&mockBridge{}, &config.RuntimeConfig{}, nil, nil, nil)
+	h := New(&mockBridge{}, &config.RuntimeConfig{AllowMacro: true}, nil, nil, nil)
 	req := httptest.NewRequest("POST", "/macro", bytes.NewReader([]byte(`{"tabId":"tab1","steps":[]}`)))
 	w := httptest.NewRecorder()
 	h.HandleMacro(w, req)
@@ -280,5 +284,15 @@ func TestHandleAction_InvalidJSON(t *testing.T) {
 	h.HandleAction(w, req)
 	if w.Code != 400 {
 		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleMacro_Disabled(t *testing.T) {
+	h := New(&mockBridge{}, &config.RuntimeConfig{}, nil, nil, nil)
+	req := httptest.NewRequest("POST", "/macro", bytes.NewReader([]byte(`{"steps":[{"kind":"click","ref":"e0"}]}`)))
+	w := httptest.NewRecorder()
+	h.HandleMacro(w, req)
+	if w.Code != 403 {
+		t.Errorf("expected 403 when macro disabled, got %d", w.Code)
 	}
 }

@@ -9,7 +9,7 @@ import (
 )
 
 func TestHandleDownload_MissingURL(t *testing.T) {
-	h := New(&mockBridge{}, &config.RuntimeConfig{}, nil, nil, nil)
+	h := New(&mockBridge{}, &config.RuntimeConfig{AllowDownload: true}, nil, nil, nil)
 	req := httptest.NewRequest("GET", "/download", nil)
 	w := httptest.NewRecorder()
 	h.HandleDownload(w, req)
@@ -19,7 +19,7 @@ func TestHandleDownload_MissingURL(t *testing.T) {
 }
 
 func TestHandleDownload_EmptyURL(t *testing.T) {
-	h := New(&mockBridge{}, &config.RuntimeConfig{}, nil, nil, nil)
+	h := New(&mockBridge{}, &config.RuntimeConfig{AllowDownload: true}, nil, nil, nil)
 	req := httptest.NewRequest("GET", "/download?url=", nil)
 	w := httptest.NewRecorder()
 	h.HandleDownload(w, req)
@@ -28,9 +28,53 @@ func TestHandleDownload_EmptyURL(t *testing.T) {
 	}
 }
 
+func TestValidateDownloadURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"valid https", "https://pinchtab.com/file.pdf", false},
+		{"valid http", "http://pinchtab.com/page", false},
+		{"file scheme", "file:///etc/passwd", true},
+		{"ftp scheme", "ftp://pinchtab.com/file", true},
+		{"data scheme", "data:text/html,hello", true},
+		{"localhost", "http://localhost:8080/secret", true},
+		{"loopback ipv4", "http://127.0.0.1/secret", true},
+		{"loopback ipv6", "http://[::1]/secret", true},
+		{"empty scheme", "://pinchtab.com", true},
+		{"no scheme", "pinchtab.com", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateDownloadURL(tt.url)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateDownloadURL(%q) error = %v, wantErr %v", tt.url, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestHandleDownload_SSRFBlocked(t *testing.T) {
+	h := New(&mockBridge{}, &config.RuntimeConfig{AllowDownload: true}, nil, nil, nil)
+	urls := []string{
+		"file:///etc/passwd",
+		"http://localhost:8080",
+		"http://127.0.0.1/admin",
+	}
+	for _, u := range urls {
+		req := httptest.NewRequest("GET", "/download?url="+u, nil)
+		w := httptest.NewRecorder()
+		h.HandleDownload(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for SSRF URL %q, got %d", u, w.Code)
+		}
+	}
+}
+
 func TestHandleTabDownload_MissingTabID(t *testing.T) {
-	h := New(&mockBridge{}, &config.RuntimeConfig{}, nil, nil, nil)
-	req := httptest.NewRequest("GET", "/tabs//download?url=https://example.com", nil)
+	h := New(&mockBridge{}, &config.RuntimeConfig{AllowDownload: true}, nil, nil, nil)
+	req := httptest.NewRequest("GET", "/tabs//download?url=https://pinchtab.com", nil)
 	w := httptest.NewRecorder()
 	h.HandleTabDownload(w, req)
 	if w.Code != http.StatusBadRequest {
@@ -39,12 +83,22 @@ func TestHandleTabDownload_MissingTabID(t *testing.T) {
 }
 
 func TestHandleTabDownload_NoTab(t *testing.T) {
-	h := New(&mockBridge{failTab: true}, &config.RuntimeConfig{}, nil, nil, nil)
-	req := httptest.NewRequest("GET", "/tabs/tab_abc/download?url=https://example.com", nil)
+	h := New(&mockBridge{failTab: true}, &config.RuntimeConfig{AllowDownload: true}, nil, nil, nil)
+	req := httptest.NewRequest("GET", "/tabs/tab_abc/download?url=https://pinchtab.com", nil)
 	req.SetPathValue("id", "tab_abc")
 	w := httptest.NewRecorder()
 	h.HandleTabDownload(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandleDownload_Disabled(t *testing.T) {
+	h := New(&mockBridge{}, &config.RuntimeConfig{}, nil, nil, nil)
+	req := httptest.NewRequest("GET", "/download?url=https://pinchtab.com/file.txt", nil)
+	w := httptest.NewRecorder()
+	h.HandleDownload(w, req)
+	if w.Code != 403 {
+		t.Errorf("expected 403 when download disabled, got %d", w.Code)
 	}
 }

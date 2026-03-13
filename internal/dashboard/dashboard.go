@@ -61,6 +61,8 @@ type Dashboard struct {
 	sysConns       map[chan SystemEvent]struct{}
 	cancel         context.CancelFunc
 	instances      InstanceLister
+	monitoring     MonitoringSource
+	serverMetrics  ServerMetricsProvider
 	childAuthToken string
 	mu             sync.RWMutex
 }
@@ -132,11 +134,13 @@ func (d *Dashboard) RegisterHandlers(mux *http.ServeMux) {
 
 	// Serve static assets under /dashboard/ with long cache (hashed filenames)
 	mux.Handle("GET /dashboard/assets/", http.StripPrefix("/dashboard", d.withLongCache(fileServer)))
-	mux.Handle("GET /dashboard/pinchtab-headed-192.png", http.StripPrefix("/dashboard", d.withLongCache(fileServer)))
+	mux.Handle("GET /dashboard/favicon.png", http.StripPrefix("/dashboard", d.withLongCache(fileServer)))
 
-	// SPA: serve dashboard.html for /dashboard
+	// SPA: serve dashboard.html for /, /login, and /dashboard/*
+	mux.Handle("GET /{$}", d.withNoCache(http.HandlerFunc(d.handleDashboardUI)))
+	mux.Handle("GET /login", d.withNoCache(http.HandlerFunc(d.handleDashboardUI)))
 	mux.Handle("GET /dashboard", d.withNoCache(http.HandlerFunc(d.handleDashboardUI)))
-	mux.Handle("GET /dashboard/", d.withNoCache(http.HandlerFunc(d.handleDashboardUI)))
+	mux.Handle("GET /dashboard/{path...}", d.withNoCache(http.HandlerFunc(d.handleDashboardUI)))
 }
 
 func (d *Dashboard) handleSSE(w http.ResponseWriter, r *http.Request) {
@@ -146,9 +150,18 @@ func (d *Dashboard) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SSE connections are intentionally long-lived. Clear the server-level write
+	// deadline for this response so the stream is not terminated after
+	// http.Server.WriteTimeout elapses.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+		http.Error(w, "streaming deadline unsupported", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	agentCh := make(chan AgentEvent, d.cfg.SSEBufferSize)
 	sysCh := make(chan SystemEvent, d.cfg.SSEBufferSize)
@@ -164,13 +177,23 @@ func (d *Dashboard) handleSSE(w http.ResponseWriter, r *http.Request) {
 		d.mu.Unlock()
 	}()
 
+	includeMemory := r.URL.Query().Get("memory") == "1"
+
 	// Send initial empty agent list
 	data, _ := json.Marshal([]interface{}{})
 	_, _ = fmt.Fprintf(w, "event: init\ndata: %s\n\n", data)
 	flusher.Flush()
 
+	if d.monitoring != nil || d.instances != nil {
+		data, _ = json.Marshal(d.monitoringSnapshot(includeMemory))
+		_, _ = fmt.Fprintf(w, "event: monitoring\ndata: %s\n\n", data)
+		flusher.Flush()
+	}
+
 	keepalive := time.NewTicker(30 * time.Second)
+	monitoring := time.NewTicker(5 * time.Second)
 	defer keepalive.Stop()
+	defer monitoring.Stop()
 
 	for {
 		select {
@@ -182,6 +205,17 @@ func (d *Dashboard) handleSSE(w http.ResponseWriter, r *http.Request) {
 			data, _ := json.Marshal(evt)
 			_, _ = fmt.Fprintf(w, "event: system\ndata: %s\n\n", data)
 			flusher.Flush()
+			if d.monitoring != nil || d.instances != nil {
+				data, _ = json.Marshal(d.monitoringSnapshot(includeMemory))
+				_, _ = fmt.Fprintf(w, "event: monitoring\ndata: %s\n\n", data)
+				flusher.Flush()
+			}
+		case <-monitoring.C:
+			if d.monitoring != nil || d.instances != nil {
+				data, _ = json.Marshal(d.monitoringSnapshot(includeMemory))
+				_, _ = fmt.Fprintf(w, "event: monitoring\ndata: %s\n\n", data)
+				flusher.Flush()
+			}
 		case <-keepalive.C:
 			_, _ = fmt.Fprintf(w, ": keepalive\n\n")
 			flusher.Flush()
@@ -191,12 +225,25 @@ func (d *Dashboard) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+const fallbackHTML = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>PinchTab Dashboard</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0a0a0a;color:#e0e0e0}.c{text-align:center;max-width:480px;padding:2rem}h1{font-size:1.5rem;margin-bottom:.5rem}p{color:#888;line-height:1.6}code{background:#1a1a2e;padding:2px 8px;border-radius:4px;font-size:.9em}</style>
+</head><body><div class="c"><h1>🦀 Dashboard not built</h1>
+<p>The React dashboard needs to be compiled before use.<br/>
+Run <code>./pdev build</code> or <code>./scripts/build-dashboard.sh</code> then rebuild the Go binary.</p>
+</div></body></html>`
+
 func (d *Dashboard) handleDashboardUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
-	data, _ := dashboardFS.ReadFile("dashboard/dashboard.html")
+	data, err := dashboardFS.ReadFile("dashboard/dashboard.html")
+	if err != nil {
+		_, _ = w.Write([]byte(fallbackHTML))
+		return
+	}
 	_, _ = w.Write(data)
 }
 

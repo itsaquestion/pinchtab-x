@@ -6,8 +6,8 @@ import type {
   Agent,
   ActivityEvent,
   Settings,
-  ServerInfo,
 } from "../generated/types";
+import type { DashboardServerInfo, MonitoringSnapshot } from "../types";
 
 export interface TabDataPoint {
   timestamp: number;
@@ -50,6 +50,10 @@ interface AppState {
   addServerDataPoint: (point: ServerDataPoint) => void;
   setCurrentTabs: (tabs: Record<string, InstanceTab[]>) => void;
   setCurrentMemory: (memory: Record<string, number>) => void;
+  applyMonitoringSnapshot: (
+    snapshot: MonitoringSnapshot,
+    includeMemory: boolean,
+  ) => void;
 
   // Agents
   agents: Agent[];
@@ -69,8 +73,8 @@ interface AppState {
   setSettings: (settings: Settings) => void;
 
   // Server info
-  serverInfo: ServerInfo | null;
-  setServerInfo: (info: ServerInfo | null) => void;
+  serverInfo: DashboardServerInfo | null;
+  setServerInfo: (info: DashboardServerInfo | null) => void;
 }
 
 const defaultSettings: Settings = {
@@ -135,6 +139,57 @@ export const useAppStore = create<AppState>((set) => ({
     })),
   setCurrentTabs: (currentTabs) => set({ currentTabs }),
   setCurrentMemory: (currentMemory) => set({ currentMemory }),
+  applyMonitoringSnapshot: (snapshot, includeMemory) =>
+    set((state) => {
+      const runningInstances = snapshot.instances.filter(
+        (instance) => instance?.status === "running",
+      );
+      const tabDataPoint: TabDataPoint = { timestamp: snapshot.timestamp };
+      const memDataPoint: MemoryDataPoint = { timestamp: snapshot.timestamp };
+      const currentTabs: Record<string, InstanceTab[]> = {};
+      const currentMemory: Record<string, number> = {};
+
+      for (const instance of runningInstances) {
+        const instanceTabs = snapshot.tabs.filter(
+          (tab) => tab.instanceId === instance.id,
+        );
+        tabDataPoint[instance.id] = instanceTabs.length;
+        currentTabs[instance.id] = instanceTabs;
+
+        if (includeMemory) {
+          const metrics = snapshot.metrics.find(
+            (entry) => entry.instanceId === instance.id,
+          );
+          if (metrics) {
+            memDataPoint[instance.id] = metrics.jsHeapUsedMB;
+            currentMemory[instance.id] = metrics.jsHeapUsedMB;
+          }
+        }
+      }
+
+      return {
+        instances: snapshot.instances,
+        currentTabs,
+        currentMemory,
+        tabsChartData:
+          runningInstances.length > 0
+            ? [...state.tabsChartData.slice(-59), tabDataPoint]
+            : state.tabsChartData,
+        memoryChartData:
+          includeMemory && runningInstances.length > 0
+            ? [...state.memoryChartData.slice(-59), memDataPoint]
+            : state.memoryChartData,
+        serverChartData: [
+          ...state.serverChartData.slice(-59),
+          {
+            timestamp: snapshot.timestamp,
+            goHeapMB: snapshot.serverMetrics.goHeapAllocMB,
+            goroutines: snapshot.serverMetrics.goNumGoroutine,
+            rateBucketHosts: snapshot.serverMetrics.rateBucketHosts,
+          },
+        ],
+      };
+    }),
 
   // Agents
   agents: [],

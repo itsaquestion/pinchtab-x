@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
+import { useAppStore } from "../../stores/useAppStore";
+import { clearStoredAuthToken, getStoredAuthToken } from "../../services/auth";
 import "./NavBar.css";
 
 interface Tab {
@@ -9,10 +11,9 @@ interface Tab {
 }
 
 const tabs: Tab[] = [
-  { id: "monitoring", path: "/monitoring", label: "Monitoring" },
-  { id: "agents", path: "/agents", label: "Agents" },
-  { id: "profiles", path: "/profiles", label: "Profiles" },
-  { id: "settings", path: "/settings", label: "Settings" },
+  { id: "monitoring", path: "/dashboard/monitoring", label: "Monitoring" },
+  { id: "profiles", path: "/dashboard/profiles", label: "Profiles" },
+  { id: "settings", path: "/dashboard/settings", label: "Settings" },
 ];
 
 interface NavBarProps {
@@ -20,10 +21,13 @@ interface NavBarProps {
 }
 
 export default function NavBar({ onRefresh }: NavBarProps) {
+  const { serverInfo } = useAppStore();
   const [refreshing, setRefreshing] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const tabsRef = useRef<HTMLElement>(null);
   const location = useLocation();
+  const navigate = useNavigate();
+  const hasStoredToken = getStoredAuthToken() !== "";
 
   // Close mobile menu on route change
   useEffect(() => {
@@ -37,13 +41,19 @@ export default function NavBar({ onRefresh }: NavBarProps) {
     setTimeout(() => setRefreshing(false), 800);
   }, [onRefresh, refreshing]);
 
+  const handleLogout = useCallback(() => {
+    clearStoredAuthToken();
+    setMobileMenuOpen(false);
+    navigate("/login", { replace: true });
+  }, [navigate]);
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!e.metaKey && !e.ctrlKey) return;
       const num = parseInt(e.key);
       if (num >= 1 && num <= tabs.length) {
         e.preventDefault();
-        window.location.hash = tabs[num - 1].path;
+        navigate(tabs[num - 1].path);
         return;
       }
       if (e.key === "r" && onRefresh) {
@@ -53,12 +63,12 @@ export default function NavBar({ onRefresh }: NavBarProps) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onRefresh, handleRefresh]);
+  }, [navigate, onRefresh, handleRefresh]);
 
   return (
-    <header className="sticky top-0 z-50 border-b border-border-subtle bg-bg-app">
-      <div className="flex h-[52px] items-center gap-0 px-4">
-        <span className="min-w-32 text-sm font-semibold tracking-wide text-text-primary">
+    <header className="sticky top-0 z-50 border-b border-border-subtle bg-bg-app/95 backdrop-blur">
+      <div className="flex h-[60px] items-center gap-0 px-4 sm:px-5">
+        <span className="min-w-32 text-sm font-semibold tracking-[0.2em] text-text-primary uppercase">
           PinchTab
         </span>
 
@@ -69,8 +79,10 @@ export default function NavBar({ onRefresh }: NavBarProps) {
               key={tab.id}
               to={tab.path}
               className={({ isActive }) =>
-                `navbar-tab relative cursor-pointer border-none bg-transparent px-3.5 py-3.5 text-sm font-medium leading-none whitespace-nowrap transition-colors duration-150 hover:text-text-primary focus-visible:rounded focus-visible:shadow-[0_0_0_2px_var(--primary)/25] focus-visible:outline-none ${
-                  isActive ? "active text-text-primary" : "text-text-secondary"
+                `navbar-tab relative cursor-pointer rounded-sm border border-transparent bg-transparent px-3.5 py-2.5 text-sm font-medium leading-none whitespace-nowrap transition-all duration-150 hover:border-border-subtle hover:bg-bg-hover/70 hover:text-text-primary focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 ${
+                  isActive
+                    ? "active border-primary/20 bg-primary/10 text-text-primary"
+                    : "text-text-secondary"
                 }`
               }
               title={`${tab.label} (⌘${i + 1})`}
@@ -81,9 +93,47 @@ export default function NavBar({ onRefresh }: NavBarProps) {
         </nav>
 
         <div className="ml-auto flex items-center gap-1.5">
+          {serverInfo && (
+            <div
+              className={`mr-2 flex items-center gap-1.5 rounded-full px-2.5 py-1 ${
+                serverInfo.restartRequired
+                  ? "border border-warning/25 bg-warning/10"
+                  : "border border-success/20 bg-success/10"
+              }`}
+              title={
+                serverInfo.restartRequired
+                  ? serverInfo.restartReasons?.join(", ") || "Restart required"
+                  : "Server running"
+              }
+            >
+              <div
+                className={`h-1.5 w-1.5 rounded-full ${
+                  serverInfo.restartRequired
+                    ? "bg-warning"
+                    : "bg-success animate-pulse"
+                }`}
+              />
+              <span
+                className={`text-[10px] font-bold uppercase tracking-wider ${
+                  serverInfo.restartRequired ? "text-warning" : "text-success"
+                }`}
+              >
+                {serverInfo.restartRequired ? "Restart Required" : "Running"}
+              </span>
+            </div>
+          )}
+          {hasStoredToken && (
+            <button
+              type="button"
+              className="mr-2 rounded-sm border border-transparent px-3 py-1.5 text-xs font-medium uppercase tracking-[0.08em] text-text-muted transition-all duration-150 hover:border-border-subtle hover:bg-bg-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+              onClick={handleLogout}
+            >
+              Logout
+            </button>
+          )}
           {onRefresh && (
             <button
-              className={`navbar-icon-btn flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-transparent bg-transparent text-base text-text-muted transition-all duration-150 hover:border-border-subtle hover:bg-bg-elevated hover:text-text-secondary focus-visible:shadow-[0_0_0_2px_var(--primary)/25] focus-visible:outline-none ${
+              className={`navbar-icon-btn flex h-8 w-8 cursor-pointer items-center justify-center rounded-sm border border-transparent bg-transparent text-base text-text-muted transition-all duration-150 hover:border-border-subtle hover:bg-bg-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 ${
                 refreshing ? "spinning" : ""
               }`}
               onClick={handleRefresh}
@@ -94,7 +144,7 @@ export default function NavBar({ onRefresh }: NavBarProps) {
           )}
           {/* Mobile menu button */}
           <button
-            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-transparent bg-transparent text-lg text-text-muted transition-all duration-150 hover:border-border-subtle hover:bg-bg-elevated hover:text-text-secondary sm:hidden"
+            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-sm border border-transparent bg-transparent text-lg text-text-muted transition-all duration-150 hover:border-border-subtle hover:bg-bg-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 sm:hidden"
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
             aria-label="Toggle menu"
           >
@@ -113,7 +163,7 @@ export default function NavBar({ onRefresh }: NavBarProps) {
               className={({ isActive }) =>
                 `px-4 py-3 text-sm font-medium transition-colors duration-150 ${
                   isActive
-                    ? "bg-bg-elevated text-text-primary"
+                    ? "bg-primary/10 text-text-primary"
                     : "text-text-secondary hover:bg-bg-elevated hover:text-text-primary"
                 }`
               }
@@ -121,6 +171,15 @@ export default function NavBar({ onRefresh }: NavBarProps) {
               {tab.label}
             </NavLink>
           ))}
+          {hasStoredToken && (
+            <button
+              type="button"
+              className="border-t border-border-subtle px-4 py-3 text-left text-sm font-medium text-text-secondary transition-colors duration-150 hover:bg-bg-elevated hover:text-text-primary"
+              onClick={handleLogout}
+            >
+              Logout
+            </button>
+          )}
         </nav>
       )}
     </header>

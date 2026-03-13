@@ -15,6 +15,8 @@ import (
 
 	"github.com/chromedp/chromedp"
 	"github.com/pinchtab/pinchtab/internal/bridge"
+	"github.com/pinchtab/pinchtab/internal/engine"
+	"github.com/pinchtab/pinchtab/internal/idpi"
 	"github.com/pinchtab/pinchtab/internal/web"
 )
 
@@ -39,7 +41,7 @@ const maxBodySize = 1 << 20
 //
 //	curl -X POST http://localhost:9867/navigate \
 //	  -H "Content-Type: application/json" \
-//	  -d '{"url":"https://example.com"}'
+//	  -d '{"url":"https://pinchtab.com"}'
 //
 // @Example curl navigate existing:
 //
@@ -49,14 +51,8 @@ const maxBodySize = 1 << 20
 //
 // @Example cli:
 //
-//	pinchtab nav https://example.com
+//	pinchtab nav https://pinchtab.com
 func (h *Handlers) HandleNavigate(w http.ResponseWriter, r *http.Request) {
-	// Ensure Chrome is initialized
-	if err := h.ensureChrome(); err != nil {
-		web.Error(w, 500, fmt.Errorf("chrome initialization: %w", err))
-		return
-	}
-
 	var req struct {
 		TabID        string  `json:"tabId"`
 		URL          string  `json:"url"`
@@ -98,6 +94,20 @@ func (h *Handlers) HandleNavigate(w http.ResponseWriter, r *http.Request) {
 		web.Error(w, 400, fmt.Errorf("url required"))
 		return
 	}
+
+	// --- Lite engine fast path ---
+	if h.useLite(engine.CapNavigate, req.URL) {
+		result, err := h.Router.Lite().Navigate(r.Context(), req.URL)
+		if err != nil {
+			web.Error(w, 502, fmt.Errorf("lite navigate: %w", err))
+			return
+		}
+		w.Header().Set("X-Engine", "lite")
+		web.JSON(w, 200, map[string]any{"tabId": result.TabID, "url": result.URL, "title": result.Title})
+		return
+	}
+
+	// Ensure Chrome is initialized
 
 	// Default to creating new tab (API design: /navigate always creates new tab)
 	// Unless explicitly reusing an existing tab by specifying TabID
@@ -149,7 +159,7 @@ func (h *Handlers) HandleNavigate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.NewTab {
-		// Block dangerous/unsupported schemes; allow bare hostnames (e.g. "example.com")
+		// Block dangerous/unsupported schemes; allow bare hostnames (e.g. "pinchtab.com")
 		// which Chrome handles gracefully by prepending https://.
 		if parsed, err := url.Parse(req.URL); err == nil && parsed.Scheme != "" {
 			blocked := parsed.Scheme == "javascript" || parsed.Scheme == "vbscript" || parsed.Scheme == "data"
@@ -157,6 +167,13 @@ func (h *Handlers) HandleNavigate(w http.ResponseWriter, r *http.Request) {
 				web.Error(w, 400, fmt.Errorf("invalid URL scheme: %s", parsed.Scheme))
 				return
 			}
+		}
+		// IDPI: block or warn on non-whitelisted domains before the tab opens.
+		if result := idpi.CheckDomain(req.URL, h.Config.IDPI); result.Blocked {
+			web.Error(w, http.StatusForbidden, fmt.Errorf("navigation blocked by IDPI: %s", result.Reason))
+			return
+		} else if result.Threat {
+			w.Header().Set("X-IDPI-Warning", result.Reason)
 		}
 		// CreateTab returns hash-based tab ID directly (e.g., "tab_XXXXXXXX")
 		hashTabID, newCtx, _, err := h.Bridge.CreateTab(req.URL)
@@ -173,10 +190,12 @@ func (h *Handlers) HandleNavigate(w http.ResponseWriter, r *http.Request) {
 			_ = bridge.SetResourceBlocking(tCtx, blockPatterns)
 		}
 
-		if err := bridge.NavigatePage(tCtx, req.URL); err != nil {
+		if err := bridge.NavigatePageWithRedirectLimit(tCtx, req.URL, h.Config.MaxRedirects); err != nil {
 			code := 500
 			errMsg := err.Error()
-			if strings.Contains(errMsg, "invalid URL") || strings.Contains(errMsg, "Cannot navigate to invalid URL") || strings.Contains(errMsg, "ERR_INVALID_URL") {
+			if errors.Is(err, bridge.ErrTooManyRedirects) {
+				code = 422
+			} else if strings.Contains(errMsg, "invalid URL") || strings.Contains(errMsg, "Cannot navigate to invalid URL") || strings.Contains(errMsg, "ERR_INVALID_URL") {
 				code = 400
 			}
 			web.Error(w, code, fmt.Errorf("navigate: %w", err))
@@ -202,6 +221,14 @@ func (h *Handlers) HandleNavigate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// IDPI: domain whitelist check also applies when re-navigating an existing tab.
+	if result := idpi.CheckDomain(req.URL, h.Config.IDPI); result.Blocked {
+		web.Error(w, http.StatusForbidden, fmt.Errorf("navigation blocked by IDPI: %s", result.Reason))
+		return
+	} else if result.Threat {
+		w.Header().Set("X-IDPI-Warning", result.Reason)
+	}
+
 	tCtx, tCancel := context.WithTimeout(ctx, navTimeout)
 	defer tCancel()
 	go web.CancelOnClientDone(r.Context(), tCancel)
@@ -213,10 +240,12 @@ func (h *Handlers) HandleNavigate(w http.ResponseWriter, r *http.Request) {
 		_ = bridge.SetResourceBlocking(tCtx, nil)
 	}
 
-	if err := bridge.NavigatePage(tCtx, req.URL); err != nil {
+	if err := bridge.NavigatePageWithRedirectLimit(tCtx, req.URL, h.Config.MaxRedirects); err != nil {
 		code := 500
 		errMsg := err.Error()
-		if strings.Contains(errMsg, "invalid URL") || strings.Contains(errMsg, "Cannot navigate to invalid URL") || strings.Contains(errMsg, "ERR_INVALID_URL") {
+		if errors.Is(err, bridge.ErrTooManyRedirects) {
+			code = 422
+		} else if strings.Contains(errMsg, "invalid URL") || strings.Contains(errMsg, "Cannot navigate to invalid URL") || strings.Contains(errMsg, "ERR_INVALID_URL") {
 			code = 400
 		}
 		web.Error(w, code, fmt.Errorf("navigate: %w", err))
@@ -354,9 +383,13 @@ func (h *Handlers) HandleTab(w http.ResponseWriter, r *http.Request) {
 		if req.URL != "" && req.URL != "about:blank" {
 			tCtx, tCancel := context.WithTimeout(ctx, h.Config.NavigateTimeout)
 			defer tCancel()
-			if err := bridge.NavigatePage(tCtx, req.URL); err != nil {
+			if err := bridge.NavigatePageWithRedirectLimit(tCtx, req.URL, h.Config.MaxRedirects); err != nil {
 				_ = h.Bridge.CloseTab(hashTabID)
-				web.Error(w, 500, fmt.Errorf("navigate: %w", err))
+				code := 500
+				if errors.Is(err, bridge.ErrTooManyRedirects) {
+					code = 422
+				}
+				web.Error(w, code, fmt.Errorf("navigate: %w", err))
 				return
 			}
 		}

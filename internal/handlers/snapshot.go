@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/chromedp/chromedp"
 	"github.com/pinchtab/pinchtab/internal/bridge"
+	"github.com/pinchtab/pinchtab/internal/engine"
+	"github.com/pinchtab/pinchtab/internal/idpi"
 	"github.com/pinchtab/pinchtab/internal/web"
 	"gopkg.in/yaml.v3"
 )
@@ -57,6 +60,25 @@ import (
 //	r = requests.get("http://localhost:9867/snapshot", params={"tabId": "abc123", "filter": "interactive"})
 //	tree = r.json()
 func (h *Handlers) HandleSnapshot(w http.ResponseWriter, r *http.Request) {
+	filter := r.URL.Query().Get("filter")
+
+	// --- Lite engine fast path ---
+	if h.useLite(engine.CapSnapshot, "") {
+		nodes, err := h.Router.Lite().Snapshot(r.Context(), filter)
+		if err != nil {
+			web.Error(w, 500, fmt.Errorf("lite snapshot: %w", err))
+			return
+		}
+		// Convert to bridge.A11yNode for API compatibility.
+		flat := make([]bridge.A11yNode, len(nodes))
+		for i, n := range nodes {
+			flat[i] = bridge.A11yNode{Ref: n.Ref, Role: n.Role, Name: n.Name, Depth: n.Depth, Value: n.Value}
+		}
+		w.Header().Set("X-Engine", "lite")
+		web.JSON(w, 200, map[string]any{"nodes": flat})
+		return
+	}
+
 	// Ensure Chrome is initialized
 	if err := h.ensureChrome(); err != nil {
 		web.Error(w, 500, fmt.Errorf("chrome initialization: %w", err))
@@ -64,7 +86,7 @@ func (h *Handlers) HandleSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tabID := r.URL.Query().Get("tabId")
-	filter := r.URL.Query().Get("filter")
+	// filter already parsed above for lite path
 	doDiff := r.URL.Query().Get("diff") == "true"
 	format := r.URL.Query().Get("format")
 	output := r.URL.Query().Get("output")
@@ -97,7 +119,10 @@ func (h *Handlers) HandleSnapshot(w http.ResponseWriter, r *http.Request) {
 	go web.CancelOnClientDone(r.Context(), tCancel)
 
 	if reqNoAnim && !h.Config.NoAnimations {
-		bridge.DisableAnimationsOnce(tCtx)
+		if err := bridge.DisableAnimationsOnce(tCtx); err != nil {
+			web.Error(w, 500, fmt.Errorf("disable animations: %w", err))
+			return
+		}
 	}
 
 	var rawResult json.RawMessage
@@ -195,6 +220,40 @@ func (h *Handlers) HandleSnapshot(w http.ResponseWriter, r *http.Request) {
 		chromedp.Title(&title),
 	)
 
+	// IDPI: scan accessibility-tree node names and values for injection patterns.
+	// The scan runs after the snapshot is built so truncation has already reduced
+	// the corpus. Headers are set before any write so they always reach the client.
+	var idpiResult idpi.CheckResult
+	if h.Config.IDPI.Enabled && h.Config.IDPI.ScanContent {
+		var sb strings.Builder
+		for _, n := range flat {
+			// Join Name and Value within the same node with a space so multi-word
+			// fields are scanned as a unit. Separate different nodes with \n so
+			// that injection phrases split across node boundaries are not merged
+			// into a false positive by the concatenation.
+			if n.Name != "" || n.Value != "" {
+				sb.WriteString(n.Name)
+				if n.Name != "" && n.Value != "" {
+					sb.WriteByte(' ')
+				}
+				sb.WriteString(n.Value)
+				sb.WriteByte('\n')
+			}
+		}
+		idpiResult = idpi.ScanContent(sb.String(), h.Config.IDPI)
+		if idpiResult.Blocked {
+			web.Error(w, http.StatusForbidden,
+				fmt.Errorf("snapshot blocked by IDPI scanner: %s", idpiResult.Reason))
+			return
+		}
+		if idpiResult.Threat {
+			w.Header().Set("X-IDPI-Warning", idpiResult.Reason)
+			if idpiResult.Pattern != "" {
+				w.Header().Set("X-IDPI-Pattern", idpiResult.Pattern)
+			}
+		}
+	}
+
 	if output == "file" {
 		snapshotDir := filepath.Join(h.Config.StateDir, "snapshots")
 		if err := os.MkdirAll(snapshotDir, 0750); err != nil {
@@ -278,7 +337,13 @@ func (h *Handlers) HandleSnapshot(w http.ResponseWriter, r *http.Request) {
 				web.Error(w, 400, fmt.Errorf("invalid path: %w", err))
 				return
 			}
-			filePath = safe
+			absBase, _ := filepath.Abs(h.Config.StateDir)
+			absPath, err := filepath.Abs(safe)
+			if err != nil || !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) {
+				web.Error(w, 400, fmt.Errorf("invalid output path"))
+				return
+			}
+			filePath = absPath
 			if err := os.MkdirAll(filepath.Dir(filePath), 0750); err != nil {
 				web.Error(w, 500, fmt.Errorf("create output dir: %w", err))
 				return
@@ -357,6 +422,9 @@ func (h *Handlers) HandleSnapshot(w http.ResponseWriter, r *http.Request) {
 		if truncated {
 			resp["truncated"] = true
 			resp["maxTokens"] = maxTokens
+		}
+		if idpiResult.Threat {
+			resp["idpiWarning"] = idpiResult.Reason
 		}
 		web.JSON(w, 200, resp)
 	}

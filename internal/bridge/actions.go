@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/chromedp"
 	"github.com/pinchtab/pinchtab/internal/human"
 )
@@ -19,6 +18,7 @@ const (
 	ActionHover      = "hover"
 	ActionSelect     = "select"
 	ActionScroll     = "scroll"
+	ActionDrag       = "drag"
 	ActionHumanClick = "humanClick"
 	ActionHumanType  = "humanType"
 )
@@ -70,7 +70,7 @@ func (b *Bridge) InitActionRegistry() {
 			if req.Key == "" {
 				return nil, fmt.Errorf("key required for press")
 			}
-			return map[string]any{"pressed": req.Key}, chromedp.Run(ctx, chromedp.KeyEvent(req.Key))
+			return map[string]any{"pressed": req.Key}, DispatchNamedKey(ctx, req.Key)
 		},
 		ActionFocus: func(ctx context.Context, req ActionRequest) (map[string]any, error) {
 			if req.Selector != "" {
@@ -127,6 +127,35 @@ func (b *Bridge) InitActionRegistry() {
 			return map[string]any{"scrolled": true, "y": 800},
 				chromedp.Run(ctx, chromedp.Evaluate("window.scrollBy(0, 800)", nil))
 		},
+		ActionDrag: func(ctx context.Context, req ActionRequest) (map[string]any, error) {
+			if req.DragX == 0 && req.DragY == 0 {
+				return nil, fmt.Errorf("dragX or dragY required for drag")
+			}
+			if req.NodeID > 0 {
+				err := DragByNodeID(ctx, req.NodeID, req.DragX, req.DragY)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]any{"dragged": true, "dragX": req.DragX, "dragY": req.DragY}, nil
+			}
+			if req.Selector != "" {
+				var nodes []*cdp.Node
+				if err := chromedp.Run(ctx,
+					chromedp.Nodes(req.Selector, &nodes, chromedp.ByQuery),
+				); err != nil {
+					return nil, err
+				}
+				if len(nodes) == 0 {
+					return nil, fmt.Errorf("element not found: %s", req.Selector)
+				}
+				err := DragByNodeID(ctx, int64(nodes[0].BackendNodeID), req.DragX, req.DragY)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]any{"dragged": true, "dragX": req.DragX, "dragY": req.DragY}, nil
+			}
+			return nil, fmt.Errorf("need selector, ref, or nodeId")
+		},
 		ActionHumanClick: func(ctx context.Context, req ActionRequest) (map[string]any, error) {
 			if req.NodeID > 0 {
 				// req.NodeID is a backendDOMNodeId from the accessibility tree
@@ -163,9 +192,13 @@ func (b *Bridge) InitActionRegistry() {
 					return nil, err
 				}
 			} else if req.NodeID > 0 {
+				// req.NodeID is a BackendNodeID from the accessibility tree (same as humanClick).
+				// Must use DOM.focus with backendNodeId, not dom.Focus().WithNodeID() which
+				// expects a DOM NodeID — a different ID space. Using the wrong type causes
+				// "Could not find node with given id (-32000)". See issue #226.
 				if err := chromedp.Run(ctx,
 					chromedp.ActionFunc(func(ctx context.Context) error {
-						return dom.Focus().WithNodeID(cdp.NodeID(req.NodeID)).Do(ctx)
+						return chromedp.FromContext(ctx).Target.Execute(ctx, "DOM.focus", map[string]any{"backendNodeId": req.NodeID}, nil)
 					}),
 				); err != nil {
 					return nil, err

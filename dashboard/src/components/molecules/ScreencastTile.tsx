@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { addTokenToUrl } from "../../services/auth";
 
 interface Props {
-  instancePort: string;
+  instanceId: string;
   tabId: string;
   label: string;
   url: string;
@@ -13,7 +14,7 @@ interface Props {
 type Status = "connecting" | "streaming" | "error";
 
 export default function ScreencastTile({
-  instancePort,
+  instanceId,
   tabId,
   label,
   url,
@@ -34,10 +35,19 @@ export default function ScreencastTile({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Connect directly to instance's screencast WebSocket
-    const wsUrl = `ws://localhost:${instancePort}/screencast?tabId=${encodeURIComponent(tabId)}&quality=${quality}&maxWidth=${maxWidth}&fps=${fps}`;
+    const params = new URLSearchParams({
+      tabId,
+      quality: String(quality),
+      maxWidth: String(maxWidth),
+      fps: String(fps),
+    });
+    const path = addTokenToUrl(
+      `/instances/${encodeURIComponent(instanceId)}/proxy/screencast?${params.toString()}`,
+    );
+    const wsUrl = new URL(path, window.location.origin);
+    wsUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 
-    const socket = new WebSocket(wsUrl);
+    const socket = new WebSocket(wsUrl.toString());
     socket.binaryType = "arraybuffer";
     socketRef.current = socket;
 
@@ -82,7 +92,7 @@ export default function ScreencastTile({
       socket.close();
       socketRef.current = null;
     };
-  }, [instancePort, tabId, quality, maxWidth, fps]);
+  }, [instanceId, tabId, quality, maxWidth, fps]);
 
   const statusColor =
     status === "streaming"

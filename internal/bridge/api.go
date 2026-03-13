@@ -26,6 +26,10 @@ type BridgeAPI interface {
 	ExecuteAction(ctx context.Context, kind string, req ActionRequest) (map[string]any, error)
 	AvailableActions() []string
 
+	// Execute runs a task for a tab with per-tab sequential execution
+	// and cross-tab bounded parallelism. If not supported, runs directly.
+	Execute(ctx context.Context, tabID string, task func(ctx context.Context) error) error
+
 	TabLockInfo(tabID string) *LockInfo
 	Lock(tabID, owner string, ttl time.Duration) error
 	Unlock(tabID, owner string) error
@@ -115,14 +119,16 @@ type AnalyticsReport struct {
 }
 
 type Instance struct {
-	ID          string    `json:"id"`              // Hash-based ID: inst_XXXXXXXX
-	ProfileID   string    `json:"profileId"`       // Hash-based profile ID: prof_XXXXXXXX
-	ProfileName string    `json:"profileName"`     // Human-readable profile name (for display only)
-	Port        string    `json:"port"`            // Internal: instance port
-	Headless    bool      `json:"headless"`        // Mode: headless vs headed
-	Status      string    `json:"status"`          // Status: starting/running/stopping/stopped/error
-	StartTime   time.Time `json:"startTime"`       // When instance was created
-	Error       string    `json:"error,omitempty"` // Error message if status=error
+	ID          string    `json:"id"`               // Hash-based ID: inst_XXXXXXXX
+	ProfileID   string    `json:"profileId"`        // Hash-based profile ID: prof_XXXXXXXX
+	ProfileName string    `json:"profileName"`      // Human-readable profile name (for display only)
+	Port        string    `json:"port"`             // Internal: instance port
+	Headless    bool      `json:"headless"`         // Mode: headless vs headed
+	Status      string    `json:"status"`           // Status: starting/running/stopping/stopped/error
+	StartTime   time.Time `json:"startTime"`        // When instance was created
+	Error       string    `json:"error,omitempty"`  // Error message if status=error
+	Attached    bool      `json:"attached"`         // True if attached to external Chrome (not launched)
+	CdpURL      string    `json:"cdpUrl,omitempty"` // CDP WebSocket URL (for attached instances)
 }
 
 type InstanceTab struct {

@@ -27,7 +27,37 @@
 
 ## What is PinchTab?
 
-PinchTab is a **standalone HTTP server** that gives AI agents direct control over a Chrome browser.
+PinchTab is a **standalone HTTP server** that gives AI agents direct control over Chrome.
+
+It has two runtime roles:
+- `pinchtab` or `pinchtab server` — the full control-plane server
+- `pinchtab bridge` — a single-instance bridge runtime
+
+Most users only need the full server. It manages profiles, instances, routing, and the web dashboard. The `bridge` mode is the thin per-instance runtime used behind the scenes for managed child instances.
+
+### Process Model
+
+PinchTab is server-first:
+- start `pinchtab` for the full control plane
+- let the server manage profiles and instances
+- let each managed instance run behind a lightweight `pinchtab bridge` runtime
+
+In practice:
+- **Server** is the public product entrypoint
+- **Bridge** is the per-instance runtime for one browser
+- **Attach** is the advanced path for registering an externally managed Chrome
+
+### Primary Usage
+
+The primary user journey is:
+
+1. install Pinchtab
+2. run `pinchtab`
+3. point your agent or tool at `http://localhost:9867`
+4. let Pinchtab act as your local browser service
+
+That is the default “replace the browser runtime” scenario.
+Most users should not need to think about `pinchtab bridge` directly.
 
 ### Key Features
 
@@ -57,7 +87,26 @@ npm install -g pinchtab
 
 **Docker:**
 ```bash
-docker run -d -p 9867:9867 pinchtab/pinchtab
+docker run -d \
+  --name pinchtab \
+  -p 127.0.0.1:9867:9867 \
+  -v pinchtab-data:/data \
+  --shm-size=2g \
+  pinchtab/pinchtab
+```
+
+The bundled container persists its managed config at `/data/.config/pinchtab/config.json`.
+If you want to supply your own config file instead, mount it and point `PINCHTAB_CONFIG` at it:
+
+```bash
+docker run -d \
+  --name pinchtab \
+  -p 127.0.0.1:9867:9867 \
+  -e PINCHTAB_CONFIG=/config/config.json \
+  -v "$PWD/config.json:/config/config.json:ro" \
+  -v pinchtab-data:/data \
+  --shm-size=2g \
+  pinchtab/pinchtab
 ```
 
 ### Use It
@@ -70,7 +119,7 @@ pinchtab
 **Terminal 2 — Control the browser:**
 ```bash
 # Navigate
-pinchtab nav https://example.com
+pinchtab nav https://pinchtab.com
 
 # Get page structure
 pinchtab snap -i -c
@@ -84,15 +133,22 @@ pinchtab text
 
 Or use the HTTP API directly:
 ```bash
-# Navigate (returns tabId)
-TAB=$(curl -s -X POST http://localhost:9867/instances \
-  -d '{"profile":"work"}' | jq -r '.id')
+# Create an instance (returns instance id)
+INST=$(curl -s -X POST http://localhost:9867/instances/launch \
+  -H "Content-Type: application/json" \
+  -d '{"name":"work","mode":"headless"}' | jq -r '.id')
+
+# Open a tab in that instance
+TAB=$(curl -s -X POST http://localhost:9867/instances/$INST/tabs/open \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://pinchtab.com"}' | jq -r '.tabId')
 
 # Get snapshot
-curl "http://localhost:9867/instances/$TAB/snapshot?filter=interactive"
+curl "http://localhost:9867/tabs/$TAB/snapshot?filter=interactive"
 
 # Click element
-curl -X POST "http://localhost:9867/instances/$TAB/action" \
+curl -X POST "http://localhost:9867/tabs/$TAB/action" \
+  -H "Content-Type: application/json" \
   -d '{"kind":"click","ref":"e5"}'
 ```
 
@@ -100,11 +156,15 @@ curl -X POST "http://localhost:9867/instances/$TAB/action" \
 
 ## Core Concepts
 
+**Server** — The main PinchTab process. It manages profiles, instances, routing, and the dashboard.
+
 **Instance** — A running Chrome process. Each instance can have one profile.
 
 **Profile** — Browser state (cookies, history, local storage). Log in once, stay logged in across restarts.
 
 **Tab** — A single webpage. Each instance can have multiple tabs.
+
+**Bridge** — The single-instance runtime behind a managed instance. Usually spawned by the server, not started manually.
 
 Read more in the [Core Concepts](https://pinchtab.com/docs/core-concepts) guide.
 
@@ -121,20 +181,33 @@ Read more in the [Core Concepts](https://pinchtab.com/docs/core-concepts) guide.
 | **Persistent sessions** | ✅ |
 | **Binary size** | ✅ |
 | **Multi-instance** | ✅ |
-| **Remote Chrome** | ✅ |
+| **External Chrome attach** | ✅ |
+
+---
+
+## Security
+
+PinchTab defaults to a local-first posture:
+
+- `server.bind = 127.0.0.1`
+- sensitive endpoint families are off by default
+- attach is off by default
+- IDPI is enabled by default with a local-only website allowlist
+
+Two controls are independent and both matter:
+
+- the API token controls who can use the server
+- the security feature gates control what the server is allowed to do
+
+IDPI adds a browser-content defense layer by restricting allowed domains and protecting extracted content from indirect prompt injection.
+
+See the full guide: [docs/guides/security.md](docs/guides/security.md)
 
 ---
 
 ## Documentation
 
 Full docs at **[pinchtab.com/docs](https://pinchtab.com/docs)**
-
-- **[Getting Started](https://pinchtab.com/docs/get-started)** — Install and run
-- **[Core Concepts](https://pinchtab.com/docs/core-concepts)** — Instances, profiles, tabs
-- **[Headless vs Headed](https://pinchtab.com/docs/headless-vs-headed)** — Choose the right mode
-- **[API Reference](https://pinchtab.com/docs/api-reference)** — HTTP endpoints
-- **[CLI Reference](https://pinchtab.com/docs/cli-reference)** — Command-line commands
-- **[Configuration](https://pinchtab.com/docs/configuration)** — Environment variables
 
 ### MCP (SMCP) integration
 
@@ -148,10 +221,10 @@ An **SMCP plugin** in this repo lets AI agents control PinchTab via the [Model C
 
 ```bash
 # Your AI agent can:
-pinchtab nav https://example.com
+pinchtab nav https://pinchtab.com
 pinchtab snap -i  # Get clickable elements
 pinchtab click e5 # Click by ref
-pinchtab fill e3 "user@example.com"  # Fill input
+pinchtab fill e3 "user@pinchtab.com"  # Fill input
 pinchtab press e7 Enter              # Submit form
 ```
 
@@ -159,7 +232,7 @@ pinchtab press e7 Enter              # Submit form
 
 ```bash
 # Extract text (token-efficient)
-pinchtab nav https://example.com/article
+pinchtab nav https://pinchtab.com/article
 pinchtab text  # ~800 tokens instead of 10,000
 ```
 
@@ -167,12 +240,16 @@ pinchtab text  # ~800 tokens instead of 10,000
 
 ```bash
 # Run multiple instances in parallel
-pinchtab instances create --profile=alice --port=9868
-pinchtab instances create --profile=bob --port=9869
+curl -s -X POST http://localhost:9867/instances/start \
+  -H "Content-Type: application/json" \
+  -d '{"profileId":"alice","mode":"headless"}'
+
+curl -s -X POST http://localhost:9867/instances/start \
+  -H "Content-Type: application/json" \
+  -d '{"profileId":"bob","mode":"headless"}'
 
 # Each instance is isolated
-curl http://localhost:9868/text?tabId=X  # Alice's instance
-curl http://localhost:9869/text?tabId=Y  # Bob's instance
+curl http://localhost:9867/instances
 ```
 
 ---

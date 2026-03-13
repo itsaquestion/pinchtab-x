@@ -54,7 +54,7 @@ func TestHandleHealth_BridgeListTargetsError(t *testing.T) {
 
 	h := &Handlers{
 		Bridge: mockBridge,
-		Config: &config.RuntimeConfig{CdpURL: "ws://localhost:9222"},
+		Config: &config.RuntimeConfig{},
 	}
 
 	req := httptest.NewRequest("GET", "/health", nil)
@@ -85,13 +85,13 @@ func TestHandleHealth_Success(t *testing.T) {
 	// Create a mock bridge that returns targets
 	mockBridge := &MockBridge{
 		targets: []*target.Info{
-			{TargetID: "target1", URL: "https://example.com", Title: "Example"},
+			{TargetID: "target1", URL: "https://pinchtab.com", Title: "Example"},
 		},
 	}
 
 	h := &Handlers{
 		Bridge: mockBridge,
-		Config: &config.RuntimeConfig{CdpURL: "ws://localhost:9222"},
+		Config: &config.RuntimeConfig{},
 	}
 
 	req := httptest.NewRequest("GET", "/health", nil)
@@ -138,7 +138,7 @@ func TestHandleTabs_NilBridge(t *testing.T) {
 func TestHandleTabs_Success(t *testing.T) {
 	mockBridge := &MockBridge{
 		targets: []*target.Info{
-			{TargetID: "tab1", URL: "https://example.com", Title: "Example", Type: "page"},
+			{TargetID: "tab1", URL: "https://pinchtab.com", Title: "Example", Type: "page"},
 			{TargetID: "tab2", URL: "https://google.com", Title: "Google", Type: "page"},
 		},
 	}
@@ -220,7 +220,7 @@ func TestHandleHealth_EnsureChromeFailure(t *testing.T) {
 func TestHandleHealth_EnsureChromeSuccess(t *testing.T) {
 	mockBridge := &MockBridge{
 		targets: []*target.Info{
-			{TargetID: "target1", URL: "https://example.com", Title: "Example"},
+			{TargetID: "target1", URL: "https://pinchtab.com", Title: "Example"},
 		},
 		ensureChromeCalled: false,
 		ensureChromeErr:    "", // No error
@@ -228,7 +228,7 @@ func TestHandleHealth_EnsureChromeSuccess(t *testing.T) {
 
 	h := &Handlers{
 		Bridge: mockBridge,
-		Config: &config.RuntimeConfig{CdpURL: "ws://localhost:9222"},
+		Config: &config.RuntimeConfig{},
 	}
 
 	req := httptest.NewRequest("GET", "/health", nil)
@@ -350,6 +350,10 @@ func (m *MockBridge) GetCrashLogs() []string {
 	return nil
 }
 
+func (m *MockBridge) Execute(ctx context.Context, tabID string, task func(ctx context.Context) error) error {
+	return task(ctx)
+}
+
 type mockBridgeDisconnected struct {
 	mockBridge
 }
@@ -389,5 +393,42 @@ func TestHandleHealth_Response(t *testing.T) {
 	}
 	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("expected application/json, got %s", ct)
+	}
+}
+
+func TestHandleHealth_IncludesFailureAndCrashDiagnostics(t *testing.T) {
+	resetObservabilityForTests()
+	bridge.ResetCrashMonitoringForTests()
+	recordFailureEvent(FailureEvent{
+		Time:      time.Now(),
+		RequestID: "req_123",
+		Method:    "GET",
+		Path:      "/tabs/bad",
+		Status:    500,
+		Type:      "http_error",
+	})
+	bridge.RecordCrashForTests(bridge.CrashEvent{
+		Time:   time.Now(),
+		Reason: "target crashed",
+	})
+
+	h := New(&mockBridge{}, &config.RuntimeConfig{}, nil, nil, nil)
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	h.HandleHealth(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if _, ok := resp["failures"]; !ok {
+		t.Fatal("expected failures diagnostics in /health response")
+	}
+	if _, ok := resp["crashes"]; !ok {
+		t.Fatal("expected crashes diagnostics in /health response")
 	}
 }

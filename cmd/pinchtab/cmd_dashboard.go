@@ -18,7 +18,16 @@ import (
 	"github.com/pinchtab/pinchtab/internal/handlers"
 	"github.com/pinchtab/pinchtab/internal/orchestrator"
 	"github.com/pinchtab/pinchtab/internal/profiles"
+	"github.com/pinchtab/pinchtab/internal/proxy"
+	"github.com/pinchtab/pinchtab/internal/scheduler"
+	"github.com/pinchtab/pinchtab/internal/strategy"
 	"github.com/pinchtab/pinchtab/internal/web"
+
+	// Register strategies via init().
+	_ "github.com/pinchtab/pinchtab/internal/strategy/alwayson"
+	_ "github.com/pinchtab/pinchtab/internal/strategy/autorestart"
+	_ "github.com/pinchtab/pinchtab/internal/strategy/explicit"
+	_ "github.com/pinchtab/pinchtab/internal/strategy/simple"
 )
 
 // runDashboard starts a lightweight dashboard server — no Chrome, no bridge.
@@ -28,10 +37,15 @@ func runDashboard(cfg *config.RuntimeConfig) {
 	if dashPort == "" {
 		dashPort = "9870"
 	}
+	startedAt := time.Now()
+	printStartupBanner(cfg, startupBannerOptions{
+		Mode:       "server",
+		ListenAddr: cfg.Bind + ":" + dashPort,
+		PublicURL:  fmt.Sprintf("http://localhost:%s", dashPort),
+		Strategy:   cfg.Strategy,
+	})
 
-	slog.Info("🦀 PinchTab", "port", dashPort)
-
-	profilesDir := filepath.Join(cfg.StateDir, "profiles")
+	profilesDir := cfg.ProfilesBaseDir
 	if err := os.MkdirAll(profilesDir, 0755); err != nil {
 		slog.Error("cannot create profiles dir", "err", err)
 		os.Exit(1)
@@ -40,9 +54,19 @@ func runDashboard(cfg *config.RuntimeConfig) {
 	profMgr := profiles.NewProfileManager(profilesDir)
 	dash := dashboard.NewDashboard(nil)
 	orch := orchestrator.NewOrchestrator(profilesDir)
+	orch.ApplyRuntimeConfig(cfg)
 	orch.SetProfileManager(profMgr)
-	orch.SetPortRange(cfg.InstancePortStart, cfg.InstancePortEnd)
 	dash.SetInstanceLister(orch)
+	dash.SetMonitoringSource(orch)
+	dash.SetServerMetricsProvider(func() dashboard.MonitoringServerMetrics {
+		snapshot := handlers.SnapshotMetrics()
+		return dashboard.MonitoringServerMetrics{
+			GoHeapAllocMB:   metricFloat(snapshot["goHeapAllocMB"]),
+			GoNumGoroutine:  metricInt(snapshot["goNumGoroutine"]),
+			RateBucketHosts: metricInt(snapshot["rateBucketHosts"]),
+		}
+	})
+	configAPI := dashboard.NewConfigAPI(cfg, orch, profMgr, orch, version, startedAt)
 
 	// Wire up instance events to SSE broadcast
 	orch.OnEvent(func(evt orchestrator.InstanceEvent) {
@@ -55,63 +79,79 @@ func runDashboard(cfg *config.RuntimeConfig) {
 	mux := http.NewServeMux()
 
 	dash.RegisterHandlers(mux)
-	orch.RegisterHandlers(mux)
+	configAPI.RegisterHandlers(mux)
 	profMgr.RegisterHandlers(mux)
 
-	// Root returns health check (API-first design)
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		web.JSON(w, 200, map[string]any{
-			"status":    "ok",
-			"mode":      "dashboard",
-			"dashboard": "/dashboard",
-			"docs":      "/api/docs",
-		})
-	})
+	// Strategy-based routing: if a known strategy is configured, let it handle
+	// instance management and shorthand route registration. Otherwise fall back
+	// to the default manual route setup for backward compatibility.
+	var activeStrategy strategy.Strategy
+	if cfg.Strategy != "" {
+		strat, err := strategy.New(cfg.Strategy)
+		if err != nil {
+			slog.Warn("unknown strategy, falling back to default", "strategy", cfg.Strategy, "err", err)
+		} else {
+			if runtimeAware, ok := strat.(strategy.RuntimeConfigAware); ok {
+				runtimeAware.SetRuntimeConfig(cfg)
+			}
+			// Inject orchestrator dependency.
+			if setter, ok := strat.(strategy.OrchestratorAware); ok {
+				setter.SetOrchestrator(orch)
+			}
+			strat.RegisterRoutes(mux)
+			activeStrategy = strat
+			slog.Info("strategy activated", "strategy", strat.Name())
+		}
+	}
 
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		web.JSON(w, 200, map[string]string{"status": "ok", "mode": "dashboard"})
-	})
+	// If no strategy handled route registration, register default routes.
+	if activeStrategy == nil {
+		orch.RegisterHandlers(mux)
+		registerDefaultProxyRoutes(mux, orch)
+	}
+
+	// Scheduler: opt-in task queue for multi-agent coordination.
+	var sched *scheduler.Scheduler
+	if cfg.Scheduler.Enabled {
+		schedCfg := scheduler.DefaultConfig()
+		schedCfg.Enabled = true
+		if cfg.Scheduler.Strategy != "" {
+			schedCfg.Strategy = cfg.Scheduler.Strategy
+		}
+		if cfg.Scheduler.MaxQueueSize > 0 {
+			schedCfg.MaxQueueSize = cfg.Scheduler.MaxQueueSize
+		}
+		if cfg.Scheduler.MaxPerAgent > 0 {
+			schedCfg.MaxPerAgent = cfg.Scheduler.MaxPerAgent
+		}
+		if cfg.Scheduler.MaxInflight > 0 {
+			schedCfg.MaxInflight = cfg.Scheduler.MaxInflight
+		}
+		if cfg.Scheduler.MaxPerAgentFlight > 0 {
+			schedCfg.MaxPerAgentFlight = cfg.Scheduler.MaxPerAgentFlight
+		}
+		if cfg.Scheduler.ResultTTLSec > 0 {
+			schedCfg.ResultTTL = time.Duration(cfg.Scheduler.ResultTTLSec) * time.Second
+		}
+		if cfg.Scheduler.WorkerCount > 0 {
+			schedCfg.WorkerCount = cfg.Scheduler.WorkerCount
+		}
+
+		resolver := &scheduler.ManagerResolver{Mgr: orch.InstanceManager()}
+		sched = scheduler.New(schedCfg, resolver)
+		sched.RegisterHandlers(mux)
+		sched.Start()
+		slog.Info("scheduler enabled", "strategy", schedCfg.Strategy, "workers", schedCfg.WorkerCount)
+	}
+
+	mux.HandleFunc("GET /health", configAPI.HandleHealth)
 
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		web.JSON(w, 200, map[string]any{"metrics": handlers.SnapshotMetrics()})
 	})
 
-	// Special handler for /tabs - return empty list if no instances
-	mux.HandleFunc("GET /tabs", func(w http.ResponseWriter, r *http.Request) {
-		target := orch.FirstRunningURL()
-		if target == "" {
-			// No instances running, return empty tabs list
-			web.JSON(w, 200, map[string]interface{}{"tabs": []interface{}{}})
-			return
-		}
-		proxyRequest(w, r, target+"/tabs")
-	})
-
-	proxyEndpoints := []string{
-		"GET /snapshot", "GET /screenshot", "GET /text",
-		"POST /navigate", "POST /action", "POST /actions", "POST /evaluate",
-		"POST /tab", "POST /tab/lock", "POST /tab/unlock",
-		"GET /cookies", "POST /cookies",
-		"GET /download", "POST /upload",
-		"GET /stealth/status", "POST /fingerprint/rotate",
-		"GET /screencast", "GET /screencast/tabs",
-		"POST /find", "POST /macro",
-	}
-	for _, ep := range proxyEndpoints {
-		endpoint := ep
-		mux.HandleFunc(endpoint, func(w http.ResponseWriter, r *http.Request) {
-			target := orch.FirstRunningURL()
-			if target == "" {
-				web.Error(w, 503, fmt.Errorf("no running instances — launch one from the Profiles tab"))
-				return
-			}
-			// Extract path from endpoint (remove method prefix)
-			path := r.URL.Path
-			proxyRequest(w, r, target+path)
-		})
-	}
-
 	handler := handlers.LoggingMiddleware(handlers.CorsMiddleware(handlers.AuthMiddleware(cfg, mux)))
+	logSecurityWarnings(cfg)
 
 	srv := &http.Server{
 		Addr:              cfg.Bind + ":" + dashPort,
@@ -122,10 +162,22 @@ func runDashboard(cfg *config.RuntimeConfig) {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	// Start strategy lifecycle if active. For strategies like simple-autorestart,
+	// Start() launches the initial instance and begins crash monitoring.
+	// When a strategy handles auto-launch, skip the manual auto-launch below.
+	strategyHandlesLaunch := false
+	if activeStrategy != nil {
+		if err := activeStrategy.Start(context.Background()); err != nil {
+			slog.Error("strategy start failed", "strategy", activeStrategy.Name(), "err", err)
+		} else if launchAware, ok := activeStrategy.(strategy.LaunchAware); ok && launchAware.HandlesLaunch() {
+			strategyHandlesLaunch = true
+		}
+	}
+
 	autoLaunch := strings.EqualFold(os.Getenv("PINCHTAB_AUTO_LAUNCH"), "1") ||
 		strings.EqualFold(os.Getenv("PINCHTAB_AUTO_LAUNCH"), "true") ||
 		strings.EqualFold(os.Getenv("PINCHTAB_AUTO_LAUNCH"), "yes")
-	if autoLaunch {
+	if autoLaunch && !strategyHandlesLaunch {
 		defaultProfile := os.Getenv("PINCHTAB_DEFAULT_PROFILE")
 		defaultProfileExplicit := defaultProfile != ""
 		defaultPort := os.Getenv("PINCHTAB_DEFAULT_PORT")
@@ -158,14 +210,22 @@ func runDashboard(cfg *config.RuntimeConfig) {
 			}
 			slog.Info("auto-launched instance", "profile", profileToLaunch, "id", inst.ID, "port", inst.Port, "headless", headlessDefault)
 		}()
-	} else {
-		slog.Info("dashboard auto-launch disabled", "hint", "set PINCHTAB_AUTO_LAUNCH=1 to enable")
+	} else if !strategyHandlesLaunch {
+		slog.Info("dashboard auto-launch disabled", "hint", "set PINCHTAB_AUTO_LAUNCH=1 or PINCHTAB_STRATEGY=always-on to enable")
 	}
 
 	shutdownOnce := &sync.Once{}
 	doShutdown := func() {
 		shutdownOnce.Do(func() {
 			slog.Info("shutting down dashboard...")
+			if activeStrategy != nil {
+				if err := activeStrategy.Stop(); err != nil {
+					slog.Warn("strategy stop failed", "err", err)
+				}
+			}
+			if sched != nil {
+				sched.Stop()
+			}
 			dash.Shutdown()
 			orch.Shutdown()
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -195,75 +255,10 @@ func runDashboard(cfg *config.RuntimeConfig) {
 	// Periodic health check: log tabs and Chrome process info every 30 seconds
 	go periodicHealthCheck(orch)
 
-	slog.Info("dashboard ready", "url", fmt.Sprintf("http://localhost:%s", dashPort))
-
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("server", "err", err)
 		os.Exit(1)
 	}
-}
-
-// proxyRequest forwards an HTTP request to a target URL.
-// For WebSocket upgrades (screencast), it does a WebSocket proxy.
-func proxyRequest(w http.ResponseWriter, r *http.Request, targetURL string) {
-	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
-	}
-
-	if isWebSocketUpgrade(r) {
-		handlers.ProxyWebSocket(w, r, targetURL)
-		return
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
-	if err != nil {
-		web.Error(w, 502, fmt.Errorf("proxy error: %w", err))
-		return
-	}
-
-	for k, vv := range r.Header {
-		for _, v := range vv {
-			proxyReq.Header.Add(k, v)
-		}
-	}
-
-	resp, err := client.Do(proxyReq)
-	if err != nil {
-		web.Error(w, 502, fmt.Errorf("instance unreachable: %w", err))
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			_, _ = w.Write(buf[:n])
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
-}
-
-func isWebSocketUpgrade(r *http.Request) bool {
-	for _, v := range r.Header["Upgrade"] {
-		if strings.EqualFold(v, "websocket") {
-			return true
-		}
-	}
-	return false
 }
 
 // periodicHealthCheck logs instance and Chrome process status every 30 seconds
@@ -299,5 +294,74 @@ func periodicHealthCheck(orch *orchestrator.Orchestrator) {
 			"headless", headlessCount,
 			"total_tabs", len(allTabs),
 		)
+	}
+}
+
+// registerDefaultProxyRoutes adds the default shorthand proxy routes
+// when no strategy is handling route registration.
+func registerDefaultProxyRoutes(mux *http.ServeMux, orch *orchestrator.Orchestrator) {
+	// Special handler for /tabs — return empty list if no instances.
+	mux.HandleFunc("GET /tabs", func(w http.ResponseWriter, r *http.Request) {
+		target := orch.FirstRunningURL()
+		if target == "" {
+			web.JSON(w, 200, map[string]any{"tabs": []any{}})
+			return
+		}
+		proxy.HTTP(w, r, target+"/tabs")
+	})
+
+	proxyEndpoints := []string{
+		"GET /snapshot", "GET /screenshot", "GET /text",
+		"POST /navigate", "POST /action", "POST /actions", "POST /evaluate",
+		"POST /tab", "POST /tab/lock", "POST /tab/unlock",
+		"GET /cookies", "POST /cookies",
+		"GET /download", "POST /upload",
+		"GET /stealth/status", "POST /fingerprint/rotate",
+		"GET /screencast", "GET /screencast/tabs",
+		"POST /find", "POST /macro",
+	}
+	for _, ep := range proxyEndpoints {
+		endpoint := ep
+		mux.HandleFunc(endpoint, func(w http.ResponseWriter, r *http.Request) {
+			target := orch.FirstRunningURL()
+			if target == "" {
+				web.Error(w, 503, fmt.Errorf("no running instances — launch one from the Profiles tab"))
+				return
+			}
+			path := r.URL.Path
+			proxy.HTTP(w, r, target+path)
+		})
+	}
+}
+
+func metricFloat(value any) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case uint64:
+		return float64(v)
+	default:
+		return 0
+	}
+}
+
+func metricInt(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case uint64:
+		return int(v)
+	default:
+		return 0
 	}
 }

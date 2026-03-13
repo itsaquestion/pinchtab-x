@@ -73,7 +73,7 @@ func TestCLINavigate(t *testing.T) {
 	defer m.close()
 	client := m.server.Client()
 
-	cliNavigate(client, m.base(), "", []string{"https://example.com"})
+	cliNavigate(client, m.base(), "", []string{"https://pinchtab.com"})
 	if m.lastMethod != "POST" {
 		t.Errorf("expected POST, got %s", m.lastMethod)
 	}
@@ -82,8 +82,8 @@ func TestCLINavigate(t *testing.T) {
 	}
 	var body map[string]any
 	_ = json.Unmarshal([]byte(m.lastBody), &body)
-	if body["url"] != "https://example.com" {
-		t.Errorf("expected url=https://example.com, got %v", body["url"])
+	if body["url"] != "https://pinchtab.com" {
+		t.Errorf("expected url=https://pinchtab.com, got %v", body["url"])
 	}
 }
 
@@ -92,7 +92,7 @@ func TestCLINavigateWithFlags(t *testing.T) {
 	defer m.close()
 	client := m.server.Client()
 
-	cliNavigate(client, m.base(), "", []string{"https://example.com", "--new-tab", "--block-images"})
+	cliNavigate(client, m.base(), "", []string{"https://pinchtab.com", "--new-tab", "--block-images"})
 	var body map[string]any
 	_ = json.Unmarshal([]byte(m.lastBody), &body)
 	if body["newTab"] != true {
@@ -108,7 +108,7 @@ func TestCLINavigateWithBlockAds(t *testing.T) {
 	defer m.close()
 	client := m.server.Client()
 
-	cliNavigate(client, m.base(), "", []string{"https://example.com", "--block-ads"})
+	cliNavigate(client, m.base(), "", []string{"https://pinchtab.com", "--block-ads"})
 	var body map[string]any
 	_ = json.Unmarshal([]byte(m.lastBody), &body)
 	if body["blockAds"] != true {
@@ -122,7 +122,7 @@ func TestCLIInstanceNavigateUsesTabRoute(t *testing.T) {
 	defer m.close()
 	client := m.server.Client()
 
-	cliInstanceNavigate(client, m.base(), "", []string{"inst-123", "https://example.com"})
+	cliInstanceNavigate(client, m.base(), "", []string{"inst-123", "https://pinchtab.com"})
 
 	if m.lastMethod != "POST" {
 		t.Errorf("expected POST, got %s", m.lastMethod)
@@ -133,7 +133,7 @@ func TestCLIInstanceNavigateUsesTabRoute(t *testing.T) {
 
 	var body map[string]any
 	_ = json.Unmarshal([]byte(m.lastBody), &body)
-	if body["url"] != "https://example.com" {
+	if body["url"] != "https://pinchtab.com" {
 		t.Errorf("expected navigate URL in body, got %v", body["url"])
 	}
 }
@@ -258,6 +258,88 @@ func TestCLIPress(t *testing.T) {
 	}
 }
 
+// TestCLIClickWithCSS verifies that --css <selector> is forwarded as the
+// "selector" field (not "ref") so that the bridge performs a CSS-based click.
+func TestCLIClickWithCSS(t *testing.T) {
+	m := newMockServer()
+	defer m.close()
+	client := m.server.Client()
+
+	cliAction(client, m.base(), "", "click", []string{"--css", "button.submit"})
+	var body map[string]any
+	_ = json.Unmarshal([]byte(m.lastBody), &body)
+	if body["selector"] != "button.submit" {
+		t.Errorf("expected selector=button.submit, got %v", body["selector"])
+	}
+	if _, hasRef := body["ref"]; hasRef {
+		t.Error("should not set ref when --css is provided")
+	}
+}
+
+// TestCLIClickWithCSS_AndWaitNav verifies that --css and --wait-nav can be
+// combined in any order.
+func TestCLIClickWithCSS_AndWaitNav(t *testing.T) {
+	m := newMockServer()
+	defer m.close()
+	client := m.server.Client()
+
+	cliAction(client, m.base(), "", "click", []string{"--wait-nav", "--css", "#login-btn"})
+	var body map[string]any
+	_ = json.Unmarshal([]byte(m.lastBody), &body)
+	if body["selector"] != "#login-btn" {
+		t.Errorf("expected selector=#login-btn, got %v", body["selector"])
+	}
+	if body["waitNav"] != true {
+		t.Error("expected waitNav=true")
+	}
+}
+
+// TestCLIHoverWithCSS verifies that hover accepts --css <selector>.
+func TestCLIHoverWithCSS(t *testing.T) {
+	m := newMockServer()
+	defer m.close()
+	client := m.server.Client()
+
+	cliAction(client, m.base(), "", "hover", []string{"--css", ".nav-item"})
+	var body map[string]any
+	_ = json.Unmarshal([]byte(m.lastBody), &body)
+	if body["selector"] != ".nav-item" {
+		t.Errorf("expected selector=.nav-item, got %v", body["selector"])
+	}
+}
+
+// TestCLIFocusWithCSS verifies that focus accepts --css <selector>.
+func TestCLIFocusWithCSS(t *testing.T) {
+	m := newMockServer()
+	defer m.close()
+	client := m.server.Client()
+
+	cliAction(client, m.base(), "", "focus", []string{"--css", "input[name='email']"})
+	var body map[string]any
+	_ = json.Unmarshal([]byte(m.lastBody), &body)
+	if body["selector"] != "input[name='email']" {
+		t.Errorf("expected selector=input[name='email'], got %v", body["selector"])
+	}
+}
+
+// TestCLIClickRefStillWorks verifies that positional <ref> args still work
+// when --css is not passed (backwards compatibility).
+func TestCLIClickRefStillWorks(t *testing.T) {
+	m := newMockServer()
+	defer m.close()
+	client := m.server.Client()
+
+	cliAction(client, m.base(), "", "click", []string{"e42"})
+	var body map[string]any
+	_ = json.Unmarshal([]byte(m.lastBody), &body)
+	if body["ref"] != "e42" {
+		t.Errorf("expected ref=e42, got %v", body["ref"])
+	}
+	if _, hasSelector := body["selector"]; hasSelector {
+		t.Error("should not set selector when using ref")
+	}
+}
+
 func TestCLIFill(t *testing.T) {
 	m := newMockServer()
 	defer m.close()
@@ -295,11 +377,18 @@ func TestCLIScroll(t *testing.T) {
 		t.Errorf("expected ref=e20, got %v", body["ref"])
 	}
 
-	// Scroll by pixels
+	// Scroll by pixels (now sends int, not string)
 	cliAction(client, m.base(), "", "scroll", []string{"800"})
 	_ = json.Unmarshal([]byte(m.lastBody), &body)
-	if body["scrollY"] != "800" {
+	if body["scrollY"] != float64(800) { // JSON unmarshals numbers as float64
 		t.Errorf("expected scrollY=800, got %v", body["scrollY"])
+	}
+
+	// Scroll by direction
+	cliAction(client, m.base(), "", "scroll", []string{"down"})
+	_ = json.Unmarshal([]byte(m.lastBody), &body)
+	if body["direction"] != "down" {
+		t.Errorf("expected direction=down, got %v", body["direction"])
 	}
 }
 
@@ -323,7 +412,7 @@ func TestCLISelect(t *testing.T) {
 
 func TestCLIText(t *testing.T) {
 	m := newMockServer()
-	m.response = `{"url":"https://example.com","title":"Example","text":"Hello"}`
+	m.response = `{"url":"https://pinchtab.com","title":"Example","text":"Hello"}`
 	defer m.close()
 	client := m.server.Client()
 
@@ -359,7 +448,7 @@ func TestCLITextTab(t *testing.T) {
 
 func TestCLITabsList(t *testing.T) {
 	m := newMockServer()
-	m.response = `[{"id":"TAB1","url":"https://example.com"}]`
+	m.response = `[{"id":"TAB1","url":"https://pinchtab.com"}]`
 	defer m.close()
 	client := m.server.Client()
 
@@ -374,7 +463,7 @@ func TestCLITabsNew(t *testing.T) {
 	defer m.close()
 	client := m.server.Client()
 
-	cliTabs(client, m.base(), "", []string{"new", "https://example.com"})
+	cliTabs(client, m.base(), "", []string{"new", "https://pinchtab.com"})
 	if m.lastPath != "/tab" {
 		t.Errorf("expected /tab, got %s", m.lastPath)
 	}
@@ -383,7 +472,7 @@ func TestCLITabsNew(t *testing.T) {
 	if body["action"] != "new" {
 		t.Errorf("expected action=new, got %v", body["action"])
 	}
-	if body["url"] != "https://example.com" {
+	if body["url"] != "https://pinchtab.com" {
 		t.Errorf("expected url, got %v", body["url"])
 	}
 }
@@ -649,5 +738,39 @@ func TestCheckServerAndGuide(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "Authentication required") {
 		t.Error("expected auth error message")
+	}
+}
+
+// TestResolveInstanceBase verifies that --instance resolves the correct base URL
+// from the orchestrator's /instances/<id> response.
+func TestResolveInstanceBase(t *testing.T) {
+	// Orchestrator mock returns an instance with port 9901.
+	orch := newMockServer()
+	orch.response = `{"id":"abc123","port":"9901","status":"running"}`
+	defer orch.close()
+	client := orch.server.Client()
+	_ = client // resolveInstanceBase builds its own client
+
+	got := resolveInstanceBase(orch.base(), "", "abc123", "127.0.0.1")
+
+	if orch.lastPath != "/instances/abc123" {
+		t.Errorf("expected GET /instances/abc123, got %s", orch.lastPath)
+	}
+	if got != "http://127.0.0.1:9901" {
+		t.Errorf("resolveInstanceBase = %q, want %q", got, "http://127.0.0.1:9901")
+	}
+}
+
+// TestResolveInstanceBase_ForwardsToken verifies that the auth token is sent to the orchestrator.
+func TestResolveInstanceBase_ForwardsToken(t *testing.T) {
+	orch := newMockServer()
+	orch.response = `{"id":"xyz","port":"9902","status":"running"}`
+	defer orch.close()
+
+	resolveInstanceBase(orch.base(), "my-token", "xyz", "localhost")
+
+	authHeader := orch.lastHeaders.Get("Authorization")
+	if authHeader != "Bearer my-token" {
+		t.Errorf("Authorization header = %q, want %q", authHeader, "Bearer my-token")
 	}
 }

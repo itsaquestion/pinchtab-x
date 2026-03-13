@@ -20,8 +20,12 @@ func printHelp() {
 	fmt.Printf(`pinchtab %s - Browser control for AI agents
 
 MODES:
-  pinchtab                  Start server (default port 9867)
+  pinchtab                  Start full server (default)
+  pinchtab server           Start full server explicitly
+  pinchtab bridge           Start single-instance bridge-only server
+  pinchtab mcp              Start MCP (Model Context Protocol) server on stdio
   pinchtab connect <name>   Get URL for a running profile
+  pinchtab security         Review runtime security posture
 
 QUICK START (requires running server):
   pinchtab quick <url>                  Navigate + analyze page (beginner-friendly)
@@ -41,7 +45,7 @@ CLI COMMANDS:
   pinchtab tabs [new <url>|close <id>]  Manage tabs
   pinchtab ss [-o file] [-q 80]         Screenshot
   pinchtab eval <expression>            Run JavaScript
-  pinchtab pdf --tab <id> [-o file] [options]  Export tab as PDF (see PDF FLAGS)
+  pinchtab pdf [-o file] [--tab <id>] [options]  Export page as PDF (see PDF FLAGS)
   pinchtab instances                    List running instances
   pinchtab profiles                     List available profiles
   pinchtab health                       Check server status
@@ -78,12 +82,15 @@ PDF FLAGS:
 
 ENVIRONMENT:
   PINCHTAB_URL         Server URL (default: http://127.0.0.1:9867)
-  PINCHTAB_TOKEN       Auth token (or BRIDGE_TOKEN for server)
-  BRIDGE_PORT          Server port (default: 9867)
-  BRIDGE_HEADLESS      Run Chrome headless (default: true)
+  PINCHTAB_TOKEN       Auth token
+  PINCHTAB_PORT        Server port (default: 9867)
+
+FLAGS (global, place before or after command):
+  --instance <id>      Target a specific instance by ID (e.g., pinchtab nav --instance abc123 https://...)
+  -I <id>              Alias for --instance
 
 Examples:
-  pinchtab nav https://example.com
+  pinchtab nav https://pinchtab.com
   pinchtab snap -i -c
   pinchtab click e5
   pinchtab type e12 hello world
@@ -113,16 +120,34 @@ func isCLICommand(cmd string) bool {
 
 func runCLI(cfg *config.RuntimeConfig) {
 	cmd := os.Args[1]
-	args := os.Args[2:]
+	rawArgs := os.Args[2:]
 
-	base := fmt.Sprintf("http://%s:%s", cfg.Bind, cfg.Port)
+	// Extract --instance/-I flag and strip it from args so sub-commands don't see it.
+	var instanceID string
+	args := make([]string, 0, len(rawArgs))
+	for i := 0; i < len(rawArgs); i++ {
+		if (rawArgs[i] == "--instance" || rawArgs[i] == "-I") && i+1 < len(rawArgs) {
+			instanceID = rawArgs[i+1]
+			i++ // skip the value
+		} else {
+			args = append(args, rawArgs[i])
+		}
+	}
+
+	orchBase := fmt.Sprintf("http://%s:%s", cfg.Bind, cfg.Port)
 	if envURL := os.Getenv("PINCHTAB_URL"); envURL != "" {
-		base = strings.TrimRight(envURL, "/")
+		orchBase = strings.TrimRight(envURL, "/")
 	}
 
 	token := cfg.Token
 	if envToken := os.Getenv("PINCHTAB_TOKEN"); envToken != "" {
 		token = envToken
+	}
+
+	// --instance resolves the target base URL from the named instance's port.
+	base := orchBase
+	if instanceID != "" {
+		base = resolveInstanceBase(orchBase, token, instanceID, cfg.Bind)
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -175,8 +200,8 @@ QUICK START:
   pinchtab quick <url>    Navigate and show page structure (combines nav + snap)
 
 WORKFLOW:
-  1. Start server:        pinchtab                  (runs on :9867)
-  2. Navigate:           pinchtab nav https://example.com
+  1. Start server:        pinchtab                  (or: pinchtab server)
+  2. Navigate:           pinchtab nav https://pinchtab.com
   3. See page:           pinchtab snap             (shows clickable refs)
   4. Interact:           pinchtab click e5         (click element)
   5. Check result:       pinchtab snap             (see changes)
@@ -216,6 +241,9 @@ Commands:
 Environment:
   PINCHTAB_URL            Server URL (default: http://localhost:9867)
   PINCHTAB_TOKEN          Auth token (sent as Bearer)
+
+Flags (global):
+  --instance <id>, -I <id>  Target a specific instance (e.g., pinchtab snap --instance abc123)
 
 Pipe with jq:
   pinchtab snap -i | jq '.nodes[] | select(.role=="link")'
@@ -291,14 +319,29 @@ func cliAction(client *http.Client, base, token, kind string, args []string) {
 
 	switch kind {
 	case "click", "hover", "focus":
-		if len(args) < 1 {
-			fatal("Usage: pinchtab %s <ref> [--wait-nav]", kind)
-		}
-		body["ref"] = args[0]
-		for _, a := range args[1:] {
-			if a == "--wait-nav" {
+		var cssSelector string
+		var refArg string
+		for i := 0; i < len(args); i++ {
+			switch args[i] {
+			case "--css":
+				if i+1 < len(args) {
+					i++
+					cssSelector = args[i]
+				}
+			case "--wait-nav":
 				body["waitNav"] = true
+			default:
+				if refArg == "" {
+					refArg = args[i]
+				}
 			}
+		}
+		if cssSelector != "" {
+			body["selector"] = cssSelector
+		} else if refArg != "" {
+			body["ref"] = refArg
+		} else {
+			fatal("Usage: pinchtab %s <ref> [--css <selector>] [--wait-nav]", kind)
 		}
 	case "type":
 		if len(args) < 2 {
@@ -323,12 +366,15 @@ func cliAction(client *http.Client, base, token, kind string, args []string) {
 		body["key"] = args[0]
 	case "scroll":
 		if len(args) < 1 {
-			fatal("Usage: pinchtab scroll <ref|pixels>  (e.g. e5 or 800)")
+			fatal("Usage: pinchtab scroll <ref|pixels|direction>  (e.g. e5, 800, down, up)")
 		}
 		if strings.HasPrefix(args[0], "e") {
 			body["ref"] = args[0]
+		} else if v, err := strconv.Atoi(args[0]); err == nil {
+			body["scrollY"] = v
 		} else {
-			body["scrollY"] = args[0]
+			// direction: down, up, etc.
+			body["direction"] = args[0]
 		}
 	case "select":
 		if len(args) < 2 {
@@ -831,11 +877,13 @@ func cliPDF(client *http.Client, base, token string, args []string) {
 	if outFile == "" {
 		outFile = fmt.Sprintf("page-%s.pdf", time.Now().Format("20060102-150405"))
 	}
-	if tabID == "" {
-		fatal("tab id required for pdf export: use --tab <tabId> or 'pinchtab tab pdf <tabId>'")
-	}
 
-	data := doGetRaw(client, base, token, fmt.Sprintf("/tabs/%s/pdf", tabID), params)
+	var data []byte
+	if tabID != "" {
+		data = doGetRaw(client, base, token, fmt.Sprintf("/tabs/%s/pdf", tabID), params)
+	} else {
+		data = doGetRaw(client, base, token, "/pdf", params)
+	}
 	if data == nil {
 		return
 	}
@@ -1182,7 +1230,7 @@ func checkServerAndGuide(client *http.Client, base, token string) bool {
 To start the server:
   pinchtab                    # Run in foreground (recommended for beginners)
   pinchtab &                  # Run in background
-  pinchtab --port 9868        # Use different port
+  PINCHTAB_PORT=9868 pinchtab # Use different port
 
 Then try your command again:
   %s
@@ -1198,7 +1246,7 @@ Learn more: https://github.com/pinchtab/pinchtab#quick-start
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == 401 {
-		fmt.Fprintf(os.Stderr, "❌ Authentication required. Set BRIDGE_TOKEN or PINCHTAB_TOKEN environment variable.\n")
+		fmt.Fprintf(os.Stderr, "❌ Authentication required. Set PINCHTAB_TOKEN.\n")
 		return false
 	}
 
@@ -1283,6 +1331,24 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// resolveInstanceBase fetches the named instance from the orchestrator and returns
+// a base URL pointing directly at that instance's API port.
+func resolveInstanceBase(orchBase, token, instanceID, bind string) string {
+	c := &http.Client{Timeout: 10 * time.Second}
+	body := doGetRaw(c, orchBase, token, fmt.Sprintf("/instances/%s", instanceID), nil)
+
+	var inst struct {
+		Port string `json:"port"`
+	}
+	if err := json.Unmarshal(body, &inst); err != nil {
+		fatal("failed to parse instance %q: %v", instanceID, err)
+	}
+	if inst.Port == "" {
+		fatal("instance %q has no port assigned (is it still starting?)", instanceID)
+	}
+	return fmt.Sprintf("http://%s:%s", bind, inst.Port)
 }
 
 func fatal(format string, args ...any) {

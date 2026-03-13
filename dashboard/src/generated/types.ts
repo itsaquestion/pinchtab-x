@@ -43,6 +43,8 @@ export interface Instance {
   status: string; // starting/running/stopping/stopped/error
   startTime: string;
   error?: string;
+  attached: boolean; // True if attached to external Chrome
+  cdpUrl?: string; // CDP WebSocket URL (for attached instances)
 }
 /**
  * Agent represents a connected AI agent.
@@ -154,4 +156,5 @@ export interface LaunchInstanceRequest {
   name?: string; // profile name
   mode?: string; // "headed" or empty for headless
   port?: string; // port number as string
+  extensionPaths?: string[]; // Chrome extension paths to load
 }

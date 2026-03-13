@@ -1,9 +1,14 @@
 package orchestrator
 
 import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/pinchtab/pinchtab/internal/bridge"
+	"github.com/pinchtab/pinchtab/internal/config"
 )
 
 func TestOrchestrator_Launch_Lifecycle(t *testing.T) {
@@ -179,4 +184,84 @@ func findSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestOrchestrator_Attach(t *testing.T) {
+	runner := &mockRunner{portAvail: true}
+	o := NewOrchestratorWithRunner(t.TempDir(), runner)
+
+	cdpURL := "ws://localhost:9222/devtools/browser/abc123"
+	inst, err := o.Attach("my-external-chrome", cdpURL)
+	if err != nil {
+		t.Fatalf("Attach failed: %v", err)
+	}
+
+	if !inst.Attached {
+		t.Error("expected Attached to be true")
+	}
+	if inst.CdpURL != cdpURL {
+		t.Errorf("expected CdpURL %q, got %q", cdpURL, inst.CdpURL)
+	}
+	if inst.Status != "running" {
+		t.Errorf("expected status running, got %s", inst.Status)
+	}
+	if inst.ProfileName != "my-external-chrome" {
+		t.Errorf("expected ProfileName %q, got %q", "my-external-chrome", inst.ProfileName)
+	}
+
+	// Check it appears in list
+	list := o.List()
+	if len(list) != 1 {
+		t.Fatalf("expected 1 instance in list, got %d", len(list))
+	}
+	if !list[0].Attached {
+		t.Error("instance in list should have Attached=true")
+	}
+}
+
+func TestOrchestrator_Attach_DuplicateName(t *testing.T) {
+	runner := &mockRunner{portAvail: true}
+	o := NewOrchestratorWithRunner(t.TempDir(), runner)
+
+	_, err := o.Attach("chrome1", "ws://localhost:9222/a")
+	if err != nil {
+		t.Fatalf("First attach failed: %v", err)
+	}
+
+	_, err = o.Attach("chrome1", "ws://localhost:9222/b")
+	if err == nil {
+		t.Error("expected error when attaching duplicate name")
+	}
+}
+
+func TestOrchestrator_RegisterHandlers_LocksSensitiveRoutes(t *testing.T) {
+	o := NewOrchestratorWithRunner(t.TempDir(), &mockRunner{portAvail: true})
+	o.ApplyRuntimeConfig(&config.RuntimeConfig{})
+
+	mux := http.NewServeMux()
+	o.RegisterHandlers(mux)
+
+	tests := []struct {
+		method  string
+		path    string
+		body    string
+		setting string
+	}{
+		{method: "POST", path: "/tabs/tab1/evaluate", body: `{"expression":"1+1"}`, setting: "security.allowEvaluate"},
+		{method: "GET", path: "/tabs/tab1/download", setting: "security.allowDownload"},
+		{method: "POST", path: "/tabs/tab1/upload", body: `{}`, setting: "security.allowUpload"},
+		{method: "GET", path: "/instances/inst1/screencast", setting: "security.allowScreencast"},
+	}
+
+	for _, tt := range tests {
+		req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != 403 {
+			t.Fatalf("%s %s expected 403, got %d", tt.method, tt.path, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), tt.setting) {
+			t.Fatalf("%s %s expected setting %s in response, got %s", tt.method, tt.path, tt.setting, w.Body.String())
+		}
+	}
 }

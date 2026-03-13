@@ -16,6 +16,14 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-ui': ['recharts'],
+          'vendor-react': ['react', 'react-dom', 'react-router-dom', 'zustand'],
+        },
+      },
+    },
   },
   test: {
     globals: true,

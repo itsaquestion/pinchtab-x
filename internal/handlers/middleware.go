@@ -34,6 +34,14 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 		atomic.AddUint64(&metricRequestLatencyN, ms)
 		if sw.Code >= 400 {
 			atomic.AddUint64(&metricRequestsFailed, 1)
+			recordFailureEvent(FailureEvent{
+				Time:      time.Now(),
+				RequestID: w.Header().Get("X-Request-Id"),
+				Method:    r.Method,
+				Path:      r.URL.Path,
+				Status:    sw.Code,
+				Type:      "http_error",
+			})
 		}
 		slog.Info("request",
 			"requestId", w.Header().Get("X-Request-Id"),
@@ -47,15 +55,30 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 
 func AuthMiddleware(cfg *config.RuntimeConfig, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPublicDashboardPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if cfg.Token != "" {
 			auth := r.Header.Get("Authorization")
-			if auth == "" {
+			qToken := r.URL.Query().Get("token")
+
+			if auth == "" && qToken == "" {
 				w.Header().Set("WWW-Authenticate", `Bearer realm="pinchtab", error="missing_token"`)
 				web.ErrorCode(w, 401, "missing_token", "unauthorized", false, nil)
 				return
 			}
-			expected := "Bearer " + cfg.Token
-			if subtle.ConstantTimeCompare([]byte(auth), []byte(expected)) != 1 {
+
+			provided := strings.TrimPrefix(auth, "Bearer ")
+			if provided == auth { // "Bearer " prefix was not present
+				if qToken != "" {
+					provided = qToken
+				} else {
+					provided = auth
+				}
+			}
+
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(cfg.Token)) != 1 {
 				w.Header().Set("WWW-Authenticate", `Bearer realm="pinchtab", error="bad_token"`)
 				web.ErrorCode(w, 401, "bad_token", "unauthorized", false, nil)
 				return
@@ -63,6 +86,14 @@ func AuthMiddleware(cfg *config.RuntimeConfig, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isPublicDashboardPath(path string) bool {
+	switch path {
+	case "/", "/login", "/dashboard", "/dashboard/":
+		return true
+	}
+	return strings.HasPrefix(path, "/dashboard/") || path == "/dashboard/favicon.png"
 }
 
 func CorsMiddleware(next http.Handler) http.Handler {

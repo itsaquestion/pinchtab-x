@@ -10,6 +10,7 @@ import (
 	"github.com/pinchtab/pinchtab/internal/bridge"
 	"github.com/pinchtab/pinchtab/internal/config"
 	"github.com/pinchtab/pinchtab/internal/dashboard"
+	"github.com/pinchtab/pinchtab/internal/engine"
 	"github.com/pinchtab/pinchtab/internal/idutil"
 	"github.com/pinchtab/pinchtab/internal/semantic"
 )
@@ -24,6 +25,7 @@ type Handlers struct {
 	Matcher      semantic.ElementMatcher
 	IntentCache  *semantic.IntentCache
 	Recovery     *semantic.RecoveryEngine
+	Router       *engine.Router // optional; nil ⇒ chrome-only
 }
 
 func New(b bridge.BridgeAPI, cfg *config.RuntimeConfig, p bridge.ProfileService, d *dashboard.Dashboard, o bridge.OrchestratorService) *Handlers {
@@ -85,6 +87,11 @@ func (h *Handlers) ensureChrome() error {
 	return h.Bridge.EnsureChrome(h.Config)
 }
 
+// useLite returns true when the engine router routes this operation to lite.
+func (h *Handlers) useLite(op engine.Capability, url string) bool {
+	return h.Router != nil && h.Router.UseLite(op, url)
+}
+
 func (h *Handlers) RegisterRoutes(mux *http.ServeMux, doShutdown func()) {
 	mux.HandleFunc("GET /health", h.HandleHealth)
 	mux.HandleFunc("POST /ensure-chrome", h.HandleEnsureChrome)
@@ -95,13 +102,14 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, doShutdown func()) {
 	mux.HandleFunc("POST /tabs/{id}/action", h.HandleTabAction)
 	mux.HandleFunc("POST /tabs/{id}/actions", h.HandleTabActions)
 	mux.HandleFunc("GET /tabs/{id}/text", h.HandleTabText)
-	mux.HandleFunc("POST /tabs/{id}/evaluate", h.HandleTabEvaluate)
 	mux.HandleFunc("GET /tabs/{id}/metrics", h.HandleTabMetrics)
 	mux.HandleFunc("GET /metrics", h.HandleMetrics)
 	mux.HandleFunc("GET /snapshot", h.HandleSnapshot)
 	mux.HandleFunc("GET /screenshot", h.HandleScreenshot)
 	mux.HandleFunc("GET /tabs/{id}/pdf", h.HandleTabPDF)
 	mux.HandleFunc("POST /tabs/{id}/pdf", h.HandleTabPDF)
+	mux.HandleFunc("GET /pdf", h.HandlePDF)
+	mux.HandleFunc("POST /pdf", h.HandlePDF)
 	mux.HandleFunc("GET /text", h.HandleText)
 	mux.HandleFunc("GET /help", h.HandleHelp)
 	mux.HandleFunc("GET /openapi.json", h.HandleOpenAPI)
@@ -112,7 +120,6 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, doShutdown func()) {
 	mux.HandleFunc("GET /action", h.HandleAction)
 	mux.HandleFunc("POST /actions", h.HandleActions)
 	mux.HandleFunc("POST /macro", h.HandleMacro)
-	mux.HandleFunc("POST /evaluate", h.HandleEvaluate)
 	mux.HandleFunc("POST /tab", h.HandleTab)
 	mux.HandleFunc("POST /tab/lock", h.HandleTabLock)
 	mux.HandleFunc("POST /tab/unlock", h.HandleTabUnlock)
@@ -128,9 +135,12 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, doShutdown func()) {
 	mux.HandleFunc("POST /tabs/{id}/upload", h.HandleTabUpload)
 	mux.HandleFunc("GET /download", h.HandleDownload)
 	mux.HandleFunc("POST /upload", h.HandleUpload)
+	mux.HandleFunc("POST /tabs/{id}/find", h.HandleFind)
 	mux.HandleFunc("POST /find", h.HandleFind)
 	mux.HandleFunc("GET /screencast", h.HandleScreencast)
 	mux.HandleFunc("GET /screencast/tabs", h.HandleScreencastAll)
+	mux.HandleFunc("POST /tabs/{id}/evaluate", h.HandleTabEvaluate)
+	mux.HandleFunc("POST /evaluate", h.HandleEvaluate)
 	mux.HandleFunc("GET /welcome", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(assets.WelcomeHTML))

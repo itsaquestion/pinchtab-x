@@ -15,10 +15,12 @@ import (
 )
 
 type TabEntry struct {
-	Ctx      context.Context
-	Cancel   context.CancelFunc
-	Accessed bool
-	CDPID    string // raw CDP target ID; set when this entry is a hash-alias
+	Ctx       context.Context
+	Cancel    context.CancelFunc
+	Accessed  bool
+	CDPID     string    // raw CDP target ID
+	CreatedAt time.Time // when the tab was first created/registered
+	LastUsed  time.Time // last time the tab was accessed via TabContext
 }
 
 type RefCache struct {
@@ -84,7 +86,9 @@ func (b *Bridge) tabSetup(ctx context.Context) {
 	}
 	b.injectStealth(ctx)
 	if b.Config.NoAnimations {
-		b.InjectNoAnimations(ctx)
+		if err := b.InjectNoAnimations(ctx); err != nil {
+			slog.Warn("no-animations injection failed", "err", err)
+		}
 	}
 }
 
@@ -174,6 +178,15 @@ func (b *Bridge) ExecuteAction(ctx context.Context, kind string, req ActionReque
 	return fn(ctx, req)
 }
 
+// Execute delegates to TabManager.Execute for safe parallel tab execution.
+// If TabManager is not initialized, the task runs directly.
+func (b *Bridge) Execute(ctx context.Context, tabID string, task func(ctx context.Context) error) error {
+	if b.TabManager != nil {
+		return b.TabManager.Execute(ctx, tabID, task)
+	}
+	return task(ctx)
+}
+
 func (b *Bridge) AvailableActions() []string {
 	keys := make([]string, 0, len(b.Actions))
 	for k := range b.Actions {
@@ -197,6 +210,8 @@ type ActionRequest struct {
 	NodeID   int64  `json:"nodeId"`
 	ScrollX  int    `json:"scrollX"`
 	ScrollY  int    `json:"scrollY"`
+	DragX    int    `json:"dragX"`
+	DragY    int    `json:"dragY"`
 	WaitNav  bool   `json:"waitNav"`
 	Fast     bool   `json:"fast"`
 	Owner    string `json:"owner"`

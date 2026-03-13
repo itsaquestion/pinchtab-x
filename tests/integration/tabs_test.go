@@ -31,7 +31,7 @@ func TestTabs_List(t *testing.T) {
 func TestTabs_New(t *testing.T) {
 	code, body := httpPost(t, "/tab", map[string]string{
 		"action": "new",
-		"url":    "https://example.com",
+		"url":    examplePageURL(t),
 	})
 	if code != 200 {
 		t.Fatalf("expected 200, got %d (body: %s)", code, body)
@@ -53,7 +53,7 @@ func TestTabs_Close(t *testing.T) {
 	// Create a tab to close
 	_, newBody := httpPost(t, "/tab", map[string]string{
 		"action": "new",
-		"url":    "https://example.com",
+		"url":    examplePageURL(t),
 	})
 	var newTab map[string]any
 	_ = json.Unmarshal(newBody, &newTab)
@@ -107,7 +107,7 @@ func TestTabs_MaxTabs(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		code, body := httpPost(t, "/tab", map[string]string{
 			"action": "new",
-			"url":    "https://example.com",
+			"url":    examplePageURL(t),
 		})
 		if code == 200 {
 			var newTab map[string]any
@@ -165,23 +165,23 @@ func TestTabs_IDFormat(t *testing.T) {
 		t.Fatal("expected tabId in response")
 	}
 
-	// Verify hash format: tab_XXXXXXXX (12 chars total)
-	if len(tabID) != 12 || tabID[:4] != "tab_" {
-		t.Errorf("expected hash format tab_XXXXXXXX, got %s", tabID)
+	// Verify tab ID is a non-empty raw CDP ID
+	if tabID == "" {
+		t.Errorf("expected non-empty tab ID")
 	}
 
 	// Clean up
 	_, _ = httpPost(t, "/tab", map[string]string{"action": "close", "tabId": tabID})
 }
 
-// TB8: Raw CDP ID rejection - security test
-func TestTabs_RejectsRawCDPID(t *testing.T) {
-	// Raw CDP target IDs (32-char hex) should be rejected
+// TB8: Nonexistent tab ID rejection
+func TestTabs_RejectsNonexistentID(t *testing.T) {
+	// A tab ID that doesn't correspond to any open tab should return 404
 	rawCDPID := "A25658CE1BA82659EBE9C93C46CEE63A"
 
-	// Try to navigate using raw CDP ID - should fail with 404
+	// Try to navigate using nonexistent tab ID - should fail with 404
 	code, _ := httpPost(t, "/tabs/"+rawCDPID+"/navigate", map[string]string{
-		"url": "https://example.com",
+		"url": examplePageURL(t),
 	})
 	if code != 404 {
 		t.Errorf("expected 404 for raw CDP ID, got %d", code)

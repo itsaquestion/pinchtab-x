@@ -90,6 +90,61 @@ func TestAuthMiddleware_MissingTokenHeader(t *testing.T) {
 	}
 }
 
+func TestAuthMiddleware_PublicDashboardPathBypassesAuth(t *testing.T) {
+	cfg := &config.RuntimeConfig{Token: "secret123"}
+	called := false
+	handler := AuthMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(200)
+	}))
+
+	req := httptest.NewRequest("GET", "/login", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if !called {
+		t.Fatal("handler should have been called for public dashboard path")
+	}
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddleware_PublicDashboardSubpathBypassesAuth(t *testing.T) {
+	cfg := &config.RuntimeConfig{Token: "secret123"}
+	called := false
+	handler := AuthMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(200)
+	}))
+
+	req := httptest.NewRequest("GET", "/dashboard/monitoring", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if !called {
+		t.Fatal("handler should have been called for public dashboard subpath")
+	}
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddleware_ProtectedAPIStillRequiresAuth(t *testing.T) {
+	cfg := &config.RuntimeConfig{Token: "secret123"}
+	handler := AuthMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+
+	req := httptest.NewRequest("GET", "/api/config", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
 func TestAuthMiddleware_TableDriven(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -160,6 +215,7 @@ func TestCorsMiddleware(t *testing.T) {
 }
 
 func TestLoggingMiddleware(t *testing.T) {
+	resetObservabilityForTests()
 	handler := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 	}))
@@ -170,6 +226,32 @@ func TestLoggingMiddleware(t *testing.T) {
 
 	if w.Code != 201 {
 		t.Errorf("expected 201, got %d", w.Code)
+	}
+}
+
+func TestLoggingMiddleware_RecordsFailure(t *testing.T) {
+	resetObservabilityForTests()
+	handler := RequestIDMiddleware(LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})))
+
+	req := httptest.NewRequest("GET", "/boom", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	snap := FailureSnapshot()
+	if got := snap["requestsFailed"].(uint64); got != 1 {
+		t.Fatalf("requestsFailed = %d, want 1", got)
+	}
+	recent, ok := snap["recent"].([]FailureEvent)
+	if !ok || len(recent) != 1 {
+		t.Fatalf("recent failures = %#v, want 1 event", snap["recent"])
+	}
+	if recent[0].Path != "/boom" {
+		t.Fatalf("recent path = %q, want /boom", recent[0].Path)
+	}
+	if recent[0].RequestID == "" {
+		t.Fatal("expected request id on failure event")
 	}
 }
 

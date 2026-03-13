@@ -1,9 +1,20 @@
 import { useEffect, useState, useMemo } from "react";
 import { useAppStore } from "../stores/useAppStore";
-import { Toolbar, EmptyState, Button, Modal, Input } from "../components/atoms";
-import { ProfileCard, ProfileDetailsModal } from "../components/molecules";
+import {
+  Toolbar,
+  EmptyState,
+  Button,
+  Modal,
+  Input,
+  Badge,
+} from "../components/atoms";
+import { ProfileDetailsPanel } from "../components/molecules";
 import * as api from "../services/api";
-import type { Profile } from "../generated/types";
+import type { LaunchInstanceRequest, Profile } from "../generated/types";
+
+function getProfileKey(profile: Profile) {
+  return profile.id || profile.name;
+}
 
 export default function ProfilesPage() {
   const {
@@ -16,7 +27,9 @@ export default function ProfilesPage() {
   } = useAppStore();
   const [showCreate, setShowCreate] = useState(false);
   const [showLaunch, setShowLaunch] = useState<string | null>(null);
-  const [showDetails, setShowDetails] = useState<Profile | null>(null);
+  const [selectedProfileKey, setSelectedProfileKey] = useState<string | null>(
+    null,
+  );
 
   // Create form
   const [createName, setCreateName] = useState("");
@@ -24,17 +37,27 @@ export default function ProfilesPage() {
   const [createSource, setCreateSource] = useState("");
 
   // Launch form
-  const [launchPort, setLaunchPort] = useState("9868");
+  const [launchPort, setLaunchPort] = useState("");
   const [launchHeadless, setLaunchHeadless] = useState(false);
   const [launchError, setLaunchError] = useState("");
   const [launchLoading, setLaunchLoading] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState("");
 
-  const loadProfiles = async () => {
+  const loadProfiles = async (preferredProfileKey?: string) => {
     setProfilesLoading(true);
     try {
       const data = await api.fetchProfiles();
       setProfiles(data);
+      if (preferredProfileKey) {
+        const preferred = data.find(
+          (profile) =>
+            getProfileKey(profile) === preferredProfileKey ||
+            profile.name === preferredProfileKey,
+        );
+        if (preferred) {
+          setSelectedProfileKey(getProfileKey(preferred));
+        }
+      }
     } catch (e) {
       console.error("Failed to load profiles", e);
     } finally {
@@ -53,7 +76,7 @@ export default function ProfilesPage() {
   const handleCreate = async () => {
     if (!createName.trim()) return;
     try {
-      await api.createProfile({
+      const created = await api.createProfile({
         name: createName.trim(),
         useWhen: createUseWhen.trim() || undefined,
       });
@@ -61,7 +84,7 @@ export default function ProfilesPage() {
       setCreateName("");
       setCreateUseWhen("");
       setCreateSource("");
-      loadProfiles();
+      loadProfiles(created.id || created.name);
     } catch (e) {
       console.error("Failed to create profile", e);
     }
@@ -72,16 +95,16 @@ export default function ProfilesPage() {
     setLaunchError("");
     setLaunchLoading(true);
     try {
-      const payload = {
+      const payload: LaunchInstanceRequest = {
         name: showLaunch,
-        port: launchPort || undefined,
-        mode: launchHeadless ? "" : "headed",
+        port: launchPort.trim() || undefined,
+        mode: launchHeadless ? undefined : "headed",
       };
       console.log("Launching instance:", payload);
       const result = await api.launchInstance(payload);
       console.log("Launch result:", result);
       setShowLaunch(null);
-      setLaunchPort("9868");
+      setLaunchPort("");
       setLaunchHeadless(false);
       // Refresh instances list
       const updated = await api.fetchInstances();
@@ -108,13 +131,26 @@ export default function ProfilesPage() {
   };
 
   const handleDelete = async () => {
-    if (!showDetails?.id) return;
+    if (!selectedProfile?.id) return;
     try {
-      await api.deleteProfile(showDetails.id);
-      setShowDetails(null);
+      await api.deleteProfile(selectedProfile.id);
+      setSelectedProfileKey(null);
       loadProfiles();
     } catch (e) {
       console.error("Failed to delete profile", e);
+    }
+  };
+
+  const handleSave = async (name: string, useWhen: string) => {
+    if (!selectedProfile?.id) return;
+    try {
+      const updated = await api.updateProfile(selectedProfile.id, {
+        name: name !== selectedProfile.name ? name : undefined,
+        useWhen: useWhen !== selectedProfile.useWhen ? useWhen : undefined,
+      });
+      loadProfiles(updated.id || selectedProfile.id);
+    } catch (e) {
+      console.error("Failed to update profile", e);
     }
   };
 
@@ -123,9 +159,13 @@ export default function ProfilesPage() {
     if (!showLaunch) return "";
     const profile = profiles.find((p) => p.name === showLaunch);
     const profileId = profile?.id || showLaunch;
-    const mode = launchHeadless ? "headless" : "headed";
-    const port = launchPort || "auto";
-    return `curl -X POST http://localhost:9867/instances/start -H "Content-Type: application/json" -d '{"profileId":"${profileId}","mode":"${mode}","port":"${port}"}'`;
+    const payload: LaunchInstanceRequest = {
+      profileId,
+      mode: launchHeadless ? undefined : "headed",
+      port: launchPort.trim() || undefined,
+    };
+
+    return `curl -X POST http://localhost:9867/instances/start -H "Content-Type: application/json" -d '${JSON.stringify(payload)}'`;
   }, [showLaunch, launchHeadless, launchPort, profiles]);
 
   const handleCopyCommand = async () => {
@@ -140,23 +180,43 @@ export default function ProfilesPage() {
   };
 
   const instanceByProfile = new Map(instances.map((i) => [i.profileName, i]));
+  const selectedProfile =
+    profiles.find((profile) => getProfileKey(profile) === selectedProfileKey) ||
+    null;
+  const runningProfiles = instances.filter(
+    (instance) => instance.status === "running",
+  ).length;
+
+  useEffect(() => {
+    if (profiles.length === 0) {
+      setSelectedProfileKey(null);
+      return;
+    }
+
+    if (
+      !selectedProfileKey ||
+      !profiles.some((profile) => getProfileKey(profile) === selectedProfileKey)
+    ) {
+      setSelectedProfileKey(getProfileKey(profiles[0]));
+    }
+  }, [profiles, selectedProfileKey]);
 
   return (
-    <div className="flex flex-1 flex-col">
+    <div className="flex h-full flex-col">
       <Toolbar
         actions={[
+          { key: "refresh", label: "Refresh", onClick: loadProfiles },
           {
             key: "new",
-            label: "+ New Profile",
+            label: "New Profile",
             onClick: () => setShowCreate(true),
             variant: "primary",
           },
-          { key: "refresh", label: "Refresh", onClick: loadProfiles },
         ]}
       />
 
-      <div className="flex-1 overflow-auto p-4">
-        <div className="mx-auto max-w-2xl">
+      <div className="flex flex-1 flex-col overflow-hidden p-4 lg:p-6">
+        <div className="h-full">
           {profilesLoading && profiles.length === 0 ? (
             <div className="flex items-center justify-center py-16 text-text-muted">
               Loading profiles...
@@ -164,25 +224,108 @@ export default function ProfilesPage() {
           ) : profiles.length === 0 ? (
             <EmptyState
               title="No profiles yet"
-              description="Click + New Profile to create one"
+              description="Click New Profile to create one"
               action={
                 <Button variant="primary" onClick={() => setShowCreate(true)}>
-                  + New Profile
+                  New Profile
                 </Button>
               }
             />
           ) : (
-            <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
-              {profiles.map((p) => (
-                <ProfileCard
-                  key={p.name}
-                  profile={p}
-                  instance={instanceByProfile.get(p.name)}
-                  onLaunch={() => setShowLaunch(p.name)}
-                  onStop={() => handleStop(p.name)}
-                  onDetails={() => setShowDetails(p)}
+            <div className="flex h-full min-h-0 flex-col gap-4 lg:flex-row">
+              <div className="dashboard-panel flex max-h-[22rem] w-full shrink-0 flex-col overflow-hidden lg:max-h-none lg:w-80">
+                <div className="border-b border-border-subtle px-4 py-3">
+                  <div className="dashboard-section-label mb-1">Profiles</div>
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-sm font-semibold text-text-secondary">
+                      Profiles ({profiles.length})
+                    </h3>
+                    <Badge
+                      variant={runningProfiles > 0 ? "success" : "default"}
+                    >
+                      {runningProfiles} running
+                    </Badge>
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-auto p-2">
+                  <div className="space-y-2">
+                    {profiles.map((profile) => {
+                      const instance = instanceByProfile.get(profile.name);
+                      const isSelected =
+                        getProfileKey(profile) === selectedProfileKey;
+                      const accountText =
+                        profile.accountEmail ||
+                        profile.accountName ||
+                        "No account";
+                      const statusVariant =
+                        instance?.status === "running"
+                          ? "success"
+                          : instance?.status === "error"
+                            ? "danger"
+                            : "default";
+                      const statusLabel =
+                        instance?.status === "running"
+                          ? `:${instance.port}`
+                          : instance?.status === "error"
+                            ? "error"
+                            : "stopped";
+
+                      return (
+                        <button
+                          key={getProfileKey(profile)}
+                          type="button"
+                          onClick={() =>
+                            setSelectedProfileKey(getProfileKey(profile))
+                          }
+                          className={`w-full rounded-2xl border px-4 py-3 text-left transition ${
+                            isSelected
+                              ? "dashboard-panel-selected border-primary"
+                              : "dashboard-panel-hover border-border-subtle bg-black/10"
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-semibold text-text-primary">
+                                {profile.name}
+                              </div>
+                              <div className="mt-1 text-xs text-text-muted">
+                                {accountText}
+                              </div>
+                            </div>
+                            <Badge variant={statusVariant}>{statusLabel}</Badge>
+                          </div>
+
+                          {profile.useWhen && (
+                            <div className="mt-3 line-clamp-2 text-xs leading-5 text-text-secondary">
+                              {profile.useWhen}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div className="min-h-0 min-w-0 flex-1">
+                <ProfileDetailsPanel
+                  profile={selectedProfile}
+                  instance={
+                    selectedProfile
+                      ? instanceByProfile.get(selectedProfile.name)
+                      : undefined
+                  }
+                  onLaunch={() =>
+                    selectedProfile && setShowLaunch(selectedProfile.name)
+                  }
+                  onStop={() =>
+                    selectedProfile && handleStop(selectedProfile.name)
+                  }
+                  onSave={handleSave}
+                  onDelete={handleDelete}
                 />
-              ))}
+              </div>
             </div>
           )}
         </div>
@@ -269,10 +412,14 @@ export default function ProfilesPage() {
           )}
           <Input
             label="Port"
-            placeholder="e.g. 9868"
+            placeholder="Auto-select from configured range"
             value={launchPort}
             onChange={(e) => setLaunchPort(e.target.value)}
           />
+          <p className="-mt-2 text-xs text-text-muted">
+            Leave blank to auto-select a free port from the configured instance
+            port range.
+          </p>
           <label className="flex items-center gap-2 text-sm text-text-secondary">
             <input
               type="checkbox"
@@ -304,16 +451,6 @@ export default function ProfilesPage() {
           </div>
         </div>
       </Modal>
-
-      {/* Profile Details Modal */}
-      <ProfileDetailsModal
-        profile={showDetails}
-        instance={
-          showDetails ? instanceByProfile.get(showDetails.name) : undefined
-        }
-        onClose={() => setShowDetails(null)}
-        onDelete={handleDelete}
-      />
     </div>
   );
 }

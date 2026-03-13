@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/pinchtab/pinchtab/internal/bridge"
 	"github.com/pinchtab/pinchtab/internal/web"
 )
 
@@ -27,11 +28,17 @@ func (h *Handlers) HandleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := map[string]any{"status": "ok", "tabs": len(targets), "cdp": h.Config.CdpURL}
+	resp := map[string]any{"status": "ok", "tabs": len(targets)}
 
 	// Include crash logs if any
 	if crashLogs := h.Bridge.GetCrashLogs(); len(crashLogs) > 0 {
 		resp["crashLogs"] = crashLogs
+	}
+	if hasFailureDiagnostics() {
+		resp["failures"] = FailureSnapshot()
+	}
+	if bridge.HasCrashDiagnostics() {
+		resp["crashes"] = bridge.CrashSnapshot()
 	}
 
 	web.JSON(w, 200, resp)
@@ -48,6 +55,12 @@ func (h *Handlers) HandleEnsureChrome(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) HandleMetrics(w http.ResponseWriter, r *http.Request) {
 	result := map[string]any{"metrics": SnapshotMetrics()}
+	if hasFailureDiagnostics() {
+		result["failures"] = FailureSnapshot()
+	}
+	if bridge.HasCrashDiagnostics() {
+		result["crashes"] = bridge.CrashSnapshot()
+	}
 
 	// Aggregate memory metrics across all tabs
 	if h.Bridge != nil {
@@ -95,13 +108,14 @@ func (h *Handlers) HandleTabs(w http.ResponseWriter, r *http.Request) {
 
 	tabs := make([]map[string]any, 0, len(targets))
 	for _, t := range targets {
+		tabID := string(t.TargetID)
 		entry := map[string]any{
-			"id":    string(t.TargetID),
+			"id":    tabID,
 			"url":   t.URL,
 			"title": t.Title,
 			"type":  t.Type,
 		}
-		if lock := h.Bridge.TabLockInfo(string(t.TargetID)); lock != nil {
+		if lock := h.Bridge.TabLockInfo(tabID); lock != nil {
 			entry["owner"] = lock.Owner
 			entry["lockedUntil"] = lock.ExpiresAt.Format(time.RFC3339)
 		}

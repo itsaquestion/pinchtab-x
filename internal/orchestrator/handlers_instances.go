@@ -143,6 +143,74 @@ func (o *Orchestrator) handleLogsByID(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(logs))
 }
 
+func (o *Orchestrator) handleLogsStreamByID(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+		http.Error(w, "streaming deadline unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	id := r.PathValue("id")
+	initial, err := o.Logs(id)
+	if err != nil {
+		web.Error(w, 404, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	writeLogs := func(logs string) bool {
+		data, err := json.Marshal(map[string]string{"logs": logs})
+		if err != nil {
+			return false
+		}
+		if _, err := fmt.Fprintf(w, "event: log\ndata: %s\n\n", data); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
+	if !writeLogs(initial) {
+		return
+	}
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	last := initial
+	for {
+		select {
+		case <-ticker.C:
+			current, err := o.Logs(id)
+			if err != nil {
+				return
+			}
+			if current != last {
+				last = current
+				if !writeLogs(current) {
+					return
+				}
+				continue
+			}
+			if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
 func (o *Orchestrator) handleStartInstance(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProfileID      string   `json:"profileId,omitempty"`
@@ -181,4 +249,120 @@ func (o *Orchestrator) handleStartInstance(w http.ResponseWriter, r *http.Reques
 	}
 
 	web.JSON(w, 201, inst)
+}
+
+func (o *Orchestrator) handleInstanceTabs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	o.mu.RLock()
+	inst, ok := o.instances[id]
+	o.mu.RUnlock()
+
+	if !ok {
+		web.Error(w, 404, fmt.Errorf("instance %q not found", id))
+		return
+	}
+
+	if inst.Status != "running" || !instanceIsActive(inst) {
+		web.Error(w, 503, fmt.Errorf("instance %q is not running (status: %s)", id, inst.Status))
+		return
+	}
+
+	tabs, err := o.fetchTabs(inst.URL)
+	if err != nil {
+		web.Error(w, 502, fmt.Errorf("failed to fetch tabs for instance %q: %w", id, err))
+		return
+	}
+
+	result := make([]map[string]any, 0, len(tabs))
+	for _, tab := range tabs {
+		result = append(result, map[string]any{
+			"id":         tab.ID,
+			"instanceId": inst.ID,
+			"url":        tab.URL,
+			"title":      tab.Title,
+		})
+	}
+
+	web.JSON(w, 200, result)
+}
+
+func (o *Orchestrator) handleAttachInstance(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CdpURL string `json:"cdpUrl"`
+		Name   string `json:"name,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		web.Error(w, 400, fmt.Errorf("invalid JSON"))
+		return
+	}
+
+	if req.CdpURL == "" {
+		web.Error(w, 400, fmt.Errorf("cdpUrl is required"))
+		return
+	}
+
+	// Validate attach is enabled and URL is allowed
+	if err := o.validateAttachURL(req.CdpURL); err != nil {
+		web.Error(w, 403, err)
+		return
+	}
+
+	// Generate name if not provided
+	name := req.Name
+	if name == "" {
+		name = fmt.Sprintf("attached-%d", time.Now().UnixNano())
+	}
+
+	inst, err := o.Attach(name, req.CdpURL)
+	if err != nil {
+		web.Error(w, 500, err)
+		return
+	}
+
+	web.JSON(w, 201, inst)
+}
+
+// validateAttachURL checks if attach is enabled and the CDP URL is allowed.
+func (o *Orchestrator) validateAttachURL(cdpURL string) error {
+	if o.runtimeCfg == nil {
+		return fmt.Errorf("attach not configured")
+	}
+
+	if !o.runtimeCfg.AttachEnabled {
+		return fmt.Errorf("attach is disabled")
+	}
+
+	parsed, err := url.Parse(cdpURL)
+	if err != nil {
+		return fmt.Errorf("invalid cdpUrl: %w", err)
+	}
+
+	// Validate scheme
+	schemeAllowed := false
+	for _, allowed := range o.runtimeCfg.AttachAllowSchemes {
+		if parsed.Scheme == allowed {
+			schemeAllowed = true
+			break
+		}
+	}
+	if !schemeAllowed {
+		return fmt.Errorf("scheme %q not allowed (allowed: %v)", parsed.Scheme, o.runtimeCfg.AttachAllowSchemes)
+	}
+
+	// Validate host
+	host := parsed.Hostname()
+	hostAllowed := false
+	for _, allowed := range o.runtimeCfg.AttachAllowHosts {
+		if host == allowed {
+			hostAllowed = true
+			break
+		}
+	}
+	if !hostAllowed {
+		return fmt.Errorf("host %q not allowed (allowed: %v)", host, o.runtimeCfg.AttachAllowHosts)
+	}
+
+	return nil
 }
